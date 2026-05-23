@@ -18,6 +18,8 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
 
 try:
     from dotenv import load_dotenv
@@ -39,17 +41,65 @@ SUPPORT_URL      = 'https://t.me/TGLeadSupportBot'
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp  = Dispatcher(storage=MemoryStorage())
 
+# ===== ДИЗАЙН =====
+DIVIDER  = '━━━━━━━━━━━━━━━━━━━━━━'
+LOGO     = f'{DIVIDER}\n    🔥 <b>TG LEAD WAREON</b>\n{DIVIDER}'
+
+PLAN_ICONS = {
+    'Miner':  '⛏️',
+    'Sender': '📨',
+    'Start':  '🚀',
+    'Pro':    '⚡',
+    'Scale':  '👑',
+}
+
+PLAN_DESC = {
+    'Miner':  'парсинг аудитории',
+    'Sender': 'массовые рассылки',
+    'Start':  'Miner + Sender',
+    'Pro':    'Start + лимиты ×3',
+    'Scale':  'всё включено',
+}
+
+PLAN_PRICE = {
+    'Miner':  '490',
+    'Sender': '990',
+    'Start':  '990',
+    'Pro':    '2 490',
+    'Scale':  '6 990',
+}
+
+
+def status_badge(days: int) -> str:
+    """Возвращает цветной индикатор статуса лицензии."""
+    if days <= 0:
+        return '🔴 Истекла'
+    elif days <= 3:
+        return f'🟡 Истекает через {days} дн.'
+    else:
+        return f'🟢 Активна · {days} дн.'
+
+
+def format_date(iso: str) -> str:
+    """2026-06-15 → 15 июня 2026"""
+    months = ['', 'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+              'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
+    try:
+        parts = iso[:10].split('-')
+        return f'{int(parts[2])} {months[int(parts[1])]} {parts[0]}'
+    except Exception:
+        return iso[:10]
+
 
 # ─────────────────────────── FSM состояния ───────────────────────
 class States(StatesGroup):
-    waiting_email  = State()   # ждём email для привязки аккаунта
-    waiting_review = State()   # ждём текст отзыва
-    review_rating  = State()   # ждём звёздную оценку
+    waiting_email  = State()
+    waiting_review = State()
+    review_rating  = State()
 
 
 # ─────────────────────────── API helper ──────────────────────────
 async def api(method: str, path: str, **kwargs) -> dict:
-    """Делает запрос к API сайта с Bot-Secret."""
     kwargs.setdefault('headers', {})['X-Bot-Secret'] = BOT_SECRET
     timeout = aiohttp.ClientTimeout(total=8)
     try:
@@ -64,56 +114,47 @@ async def api(method: str, path: str, **kwargs) -> dict:
 # ─────────────────────────── Клавиатуры ──────────────────────────
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🛡 Мои лицензии',            callback_data='licenses')],
+        [InlineKeyboardButton(text='💳 Купить / Продлить',        callback_data='buy')],
+        [InlineKeyboardButton(text='🔑 Ключ активации',           callback_data='get_key')],
+        [InlineKeyboardButton(text='👥 Реферальная программа',    callback_data='referral')],
         [
-            InlineKeyboardButton(text='📜 Мои лицензии',    callback_data='licenses'),
-            InlineKeyboardButton(text='💳 Купить/продлить', callback_data='buy'),
-        ],
-        [
-            InlineKeyboardButton(text='🔑 Получить ключ',   callback_data='get_key'),
-            InlineKeyboardButton(text='🎁 Рефералы',         callback_data='referral'),
-        ],
-        [
-            InlineKeyboardButton(text='⭐ Оставить отзыв',  callback_data='review'),
-            InlineKeyboardButton(text='💬 Поддержка',        url=SUPPORT_URL),
+            InlineKeyboardButton(text='⭐️ Отзыв  +2 дня', callback_data='review'),
+            InlineKeyboardButton(text='💬 Поддержка',      url=SUPPORT_URL),
         ],
     ])
 
 
 def kb_back() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='← Главное меню', callback_data='menu')]
+        [InlineKeyboardButton(text='🏠 Главное меню', callback_data='menu')]
     ])
 
 
 def kb_buy() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text='⛏️ Miner — 490₽/мес',  url=f'{SITE_URL}/buy/miner'),
-            InlineKeyboardButton(text='📨 Sender — 990₽/мес', url=f'{SITE_URL}/buy/sender'),
-        ],
-        [
-            InlineKeyboardButton(text='🚀 Start — 990₽/мес',  url=f'{SITE_URL}/buy/start'),
-            InlineKeyboardButton(text='⚡ Pro — 2 490₽/мес',  url=f'{SITE_URL}/buy/pro'),
-        ],
-        [
-            InlineKeyboardButton(text='🏆 Scale — 6 990₽/мес', url=f'{SITE_URL}/buy/scale'),
-        ],
-        [InlineKeyboardButton(text='← Назад', callback_data='menu')],
-    ])
+    rows = []
+    for key in ['Miner', 'Sender', 'Start', 'Pro', 'Scale']:
+        icon  = PLAN_ICONS[key]
+        price = PLAN_PRICE[key]
+        desc  = PLAN_DESC[key]
+        label = f'{icon} {key}  ·  {price} ₽/мес'
+        rows.append([InlineKeyboardButton(text=label, url=f'{SITE_URL}/buy/{key.lower()}')])
+    rows.append([InlineKeyboardButton(text='🏠 Главное меню', callback_data='menu')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kb_stars() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text='⭐ 1', callback_data='star_1'),
-            InlineKeyboardButton(text='⭐⭐ 2', callback_data='star_2'),
-            InlineKeyboardButton(text='⭐⭐⭐ 3', callback_data='star_3'),
+            InlineKeyboardButton(text='1 ★',     callback_data='star_1'),
+            InlineKeyboardButton(text='2 ★★',    callback_data='star_2'),
+            InlineKeyboardButton(text='3 ★★★',   callback_data='star_3'),
         ],
         [
-            InlineKeyboardButton(text='⭐⭐⭐⭐ 4', callback_data='star_4'),
-            InlineKeyboardButton(text='⭐⭐⭐⭐⭐ 5', callback_data='star_5'),
+            InlineKeyboardButton(text='4 ★★★★',  callback_data='star_4'),
+            InlineKeyboardButton(text='5 ★★★★★', callback_data='star_5'),
         ],
-        [InlineKeyboardButton(text='← Отмена', callback_data='menu')],
+        [InlineKeyboardButton(text='✖️ Отмена', callback_data='menu')],
     ])
 
 
@@ -136,41 +177,57 @@ async def cmd_start(message: Message, state: FSMContext):
         licenses = data.get('licenses', [])
         active   = [l for l in licenses if not l['is_expired']]
 
-        status = f'✅ Активных лицензий: <b>{len(active)}</b>' if active else '❌ Нет активных лицензий'
+        if active:
+            # Ближайшее истечение
+            soonest   = min(active, key=lambda l: l['days_left'])
+            lic_count = f'🟢 Активна  ·  {len(active)} {"лицензия" if len(active) == 1 else "лицензии" if len(active) < 5 else "лицензий"}'
+            exp_line  = f'📅 До {format_date(soonest["expires_at"])}'
+        else:
+            lic_count = '🔴 Нет активных лицензий'
+            exp_line  = f'💡 Перейдите в «Купить / Продлить»'
 
         await message.answer(
+            f'{LOGO}\n\n'
             f'👋 Привет, <b>{name}</b>!\n\n'
-            f'{status}\n\n'
-            f'Выбери раздел:',
+            f'{lic_count}\n'
+            f'{exp_line}\n\n'
+            f'Выберите раздел 👇',
             reply_markup=kb_main()
         )
     else:
         await message.answer(
-            '👋 Привет! Я главный бот <b>TG Lead Wareon</b>.\n\n'
-            'Управляйте лицензиями, получайте ключи и следите за подпиской '
-            'прямо здесь — без захода на сайт.\n\n'
-            '📧 Введите <b>email</b>, с которым вы зарегистрированы на сайте:\n\n'
-            '<i>Ещё нет аккаунта? Зарегистрируйтесь: tgleadwareon.ru/register</i>'
+            f'{LOGO}\n\n'
+            f'👋 Добро пожаловать!\n\n'
+            f'Управляйте лицензиями, получайте ключи\n'
+            f'и следите за подпиской — без захода на сайт.\n\n'
+            f'{DIVIDER}\n\n'
+            f'📧 Введите <b>email</b>, с которым вы\n'
+            f'зарегистрированы на сайте:\n\n'
+            f'<i>Нет аккаунта? → <a href="{SITE_URL}/register">Регистрация</a></i>'
         )
         await state.set_state(States.waiting_email)
 
 
 async def _handle_link_code(message: Message, state: FSMContext, code: str):
     """Привязка через QR-код (deep link)."""
-    tg_id = str(message.from_user.id)
+    tg_id  = str(message.from_user.id)
     result = await api('post', '/api/bot/link_code', json={'code': code, 'tg_id': tg_id})
 
     if result.get('ok'):
         data = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
         name = data.get('user', {}).get('name', 'пользователь')
         await message.answer(
-            f'✅ Аккаунт успешно привязан!\n\nПривет, <b>{name}</b>! Добро пожаловать.',
+            f'{LOGO}\n\n'
+            f'✅ <b>Аккаунт привязан!</b>\n\n'
+            f'Привет, <b>{name}</b>! Добро пожаловать.\n\n'
+            f'Выберите раздел 👇',
             reply_markup=kb_main()
         )
     else:
         err = result.get('error', 'Неизвестная ошибка')
         await message.answer(
-            f'❌ Не удалось привязать по QR-коду: {err}\n\n'
+            f'❌ <b>Не удалось привязать по QR-коду</b>\n\n'
+            f'<i>{err}</i>\n\n'
             f'Введите email вручную:'
         )
         await state.set_state(States.waiting_email)
@@ -182,7 +239,10 @@ async def process_email(message: Message, state: FSMContext):
     email = message.text.strip().lower()
 
     if '@' not in email or '.' not in email:
-        await message.answer('❌ Введите корректный email-адрес:')
+        await message.answer(
+            '❌ <b>Некорректный email</b>\n\n'
+            'Введите адрес в формате <code>name@domain.ru</code>:'
+        )
         return
 
     tg_id       = str(message.from_user.id)
@@ -199,21 +259,24 @@ async def process_email(message: Message, state: FSMContext):
         name = data.get('user', {}).get('name', email.split('@')[0])
         await state.clear()
         await message.answer(
-            f'✅ <b>Аккаунт привязан!</b>\n\n'
-            f'Привет, <b>{name}</b>! Теперь управляйте подпиской прямо здесь.',
+            f'{LOGO}\n\n'
+            f'✅ <b>Аккаунт успешно привязан!</b>\n\n'
+            f'Привет, <b>{name}</b>!\n'
+            f'Теперь управляйте подпиской прямо здесь.\n\n'
+            f'Выберите раздел 👇',
             reply_markup=kb_main()
         )
     else:
         err = result.get('error', '')
         if 'не найден' in err:
             await message.answer(
-                f'❌ Аккаунт <code>{email}</code> не найден.\n\n'
-                f'Зарегистрируйтесь на сайте:\n'
-                f'<a href="{SITE_URL}/register">tgleadwareon.ru/register</a>\n\n'
-                f'Затем введите email снова:'
+                f'❌ <b>Аккаунт не найден</b>\n\n'
+                f'Email <code>{email}</code> не зарегистрирован.\n\n'
+                f'👉 <a href="{SITE_URL}/register">Создать аккаунт</a>\n\n'
+                f'После регистрации введите email снова:'
             )
         else:
-            await message.answer(f'⚠️ Ошибка: {err}\n\nПопробуйте ещё раз:')
+            await message.answer(f'⚠️ <b>Ошибка:</b> {err}\n\nПопробуйте ещё раз:')
 
 
 # ─────────────────────────── Главное меню ────────────────────────
@@ -224,12 +287,27 @@ async def cb_menu(call: CallbackQuery, state: FSMContext):
     data  = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
 
     if data.get('found'):
+        name     = data['user']['name']
         licenses = data.get('licenses', [])
         active   = [l for l in licenses if not l['is_expired']]
-        status   = f'✅ Активных: <b>{len(active)}</b>' if active else '❌ Нет активных лицензий'
-        text     = f'📋 <b>Главное меню</b>\n\n{status}\n\nВыбери раздел:'
+
+        if active:
+            soonest  = min(active, key=lambda l: l['days_left'])
+            lic_line = f'🟢 Активна  ·  {len(active)} лиц.'
+            exp_line = f'📅 До {format_date(soonest["expires_at"])}'
+        else:
+            lic_line = '🔴 Нет активных лицензий'
+            exp_line = f'💡 Перейдите в «Купить / Продлить»'
+
+        text = (
+            f'{LOGO}\n\n'
+            f'👤 <b>{name}</b>\n\n'
+            f'{lic_line}\n'
+            f'{exp_line}\n\n'
+            f'Выберите раздел 👇'
+        )
     else:
-        text = '📋 <b>Главное меню</b>\n\nВыбери раздел:'
+        text = f'{LOGO}\n\nВыберите раздел 👇'
 
     await call.message.edit_text(text, reply_markup=kb_main())
 
@@ -248,29 +326,37 @@ async def cb_licenses(call: CallbackQuery):
 
     if not licenses:
         text = (
-            '📜 <b>Мои лицензии</b>\n\n'
-            '❌ Активных лицензий нет.\n\n'
-            'Приобретите подписку в разделе «Купить/продлить».'
+            f'🛡 <b>Мои лицензии</b>\n'
+            f'{DIVIDER}\n\n'
+            f'🔴 Активных лицензий нет\n\n'
+            f'Приобретите подписку, чтобы начать работу.'
         )
+        buttons = [
+            [InlineKeyboardButton(text='💳 Выбрать тариф', callback_data='buy')],
+            [InlineKeyboardButton(text='🏠 Главное меню',  callback_data='menu')],
+        ]
     else:
-        ICONS = {'Miner': '⛏️', 'Sender': '📨', 'Start': '🚀', 'Pro': '⚡', 'Scale': '🏆'}
-        lines = ['📜 <b>Мои лицензии</b>\n']
+        lines = [f'🛡 <b>Мои лицензии</b>\n{DIVIDER}']
         for lic in licenses:
-            icon     = ICONS.get(lic['product'], '📦')
-            days     = lic['days_left']
-            warn     = ' ⚠️' if 0 < days <= 3 else (' ❌' if days == 0 else '')
-            expires  = lic['expires_at'][:10]
+            icon   = PLAN_ICONS.get(lic['product'], '📦')
+            days   = lic['days_left']
+            badge  = status_badge(days)
+            date   = format_date(lic['expires_at'])
             lines.append(
-                f'{icon} <b>{lic["product"]}</b>{warn}\n'
-                f'   ⏳ Осталось: <b>{days} дн.</b> · до {expires}'
+                f'\n{icon} <b>{lic["product"].upper()}</b>\n'
+                f'   {badge}\n'
+                f'   📅 До {date}'
             )
-        text = '\n\n'.join(lines)
+        text = '\n'.join(lines)
+        buttons = [
+            [InlineKeyboardButton(text='💳 Продлить',     callback_data='buy')],
+            [InlineKeyboardButton(text='🏠 Главное меню', callback_data='menu')],
+        ]
 
-    buttons = [
-        [InlineKeyboardButton(text='💳 Продлить', callback_data='buy')],
-        [InlineKeyboardButton(text='← Главное меню', callback_data='menu')],
-    ]
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
 
 
 # ─────────────────────────── Получить ключ ───────────────────────
@@ -287,37 +373,50 @@ async def cb_get_key(call: CallbackQuery):
 
     if not active:
         await call.message.edit_text(
-            '🔑 <b>Лицензионный ключ</b>\n\n'
-            '❌ Активных лицензий нет.\n\n'
-            'Приобретите подписку, чтобы получить ключ.',
+            f'🔑 <b>Ключ активации</b>\n'
+            f'{DIVIDER}\n\n'
+            f'🔴 Нет активных лицензий\n\n'
+            f'Приобретите подписку, чтобы получить ключ.',
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text='💳 Купить', callback_data='buy')],
-                [InlineKeyboardButton(text='← Назад',  callback_data='menu')],
+                [InlineKeyboardButton(text='💳 Выбрать тариф', callback_data='buy')],
+                [InlineKeyboardButton(text='🏠 Главное меню',  callback_data='menu')],
             ])
         )
         return
 
-    lines = ['🔑 <b>Ваши лицензионные ключи</b>\n',
-             '<i>Нажмите на ключ, чтобы скопировать</i>\n']
+    lines = [
+        f'🔑 <b>Ключи активации</b>\n'
+        f'{DIVIDER}\n'
+        f'<i>Нажмите на ключ, чтобы скопировать</i>'
+    ]
     for lic in active:
-        ICONS = {'Miner': '⛏️', 'Sender': '📨', 'Start': '🚀', 'Pro': '⚡', 'Scale': '🏆'}
-        icon = ICONS.get(lic['product'], '📦')
+        icon  = PLAN_ICONS.get(lic['product'], '📦')
+        days  = lic['days_left']
+        badge = status_badge(days)
         lines.append(
-            f'{icon} <b>{lic["product"]}</b> ({lic["days_left"]} дн.)\n'
+            f'\n{icon} <b>{lic["product"]}</b>  ·  {badge}\n'
             f'<code>{lic["license_key"]}</code>'
         )
-    await call.message.edit_text('\n\n'.join(lines), reply_markup=kb_back())
+
+    await call.message.edit_text('\n'.join(lines), reply_markup=kb_back())
 
 
 # ─────────────────────────── Купить / продлить ───────────────────
 @dp.callback_query(F.data == 'buy')
 async def cb_buy(call: CallbackQuery):
-    await call.message.edit_text(
-        '💳 <b>Купить или продлить</b>\n\n'
-        'Выберите тариф — откроется страница оплаты через Lava.top.\n'
-        'После оплаты лицензия активируется автоматически.',
-        reply_markup=kb_buy()
-    )
+    lines = [
+        f'💳 <b>Тарифы</b>\n{DIVIDER}\n'
+    ]
+    for key in ['Miner', 'Sender', 'Start', 'Pro', 'Scale']:
+        icon  = PLAN_ICONS[key]
+        price = PLAN_PRICE[key]
+        desc  = PLAN_DESC[key]
+        lines.append(f'{icon} <b>{key}</b> — {desc}\n    └ {price} ₽ / месяц')
+
+    lines.append(f'\n{DIVIDER}')
+    lines.append('⬇️ Нажмите на тариф для оплаты\n💡 Лицензия активируется автоматически')
+
+    await call.message.edit_text('\n'.join(lines), reply_markup=kb_buy())
 
 
 # ─────────────────────────── Рефералы ────────────────────────────
@@ -334,17 +433,21 @@ async def cb_referral(call: CallbackQuery):
     count    = data.get('referral_count', 0)
 
     promo = (
-        f'«Попробуй TG Lead Wareon — инструмент для работы с Telegram-аудиторией. '
-        f'3 дня бесплатно: {ref_link}»'
+        f'Попробуй TG Lead Wareon — лучший инструмент для '
+        f'парсинга и рассылок в Telegram. Первые 3 дня бесплатно 👉 {ref_link}'
     )
 
     await call.message.edit_text(
-        f'🎁 <b>Реферальная программа</b>\n\n'
-        f'👥 Приглашено: <b>{count} чел.</b>\n'
-        f'🎁 Бонус: <b>+{count} дн.</b> к лицензии\n'
-        f'📈 За каждого нового пользователя — <b>+1 день</b> автоматически\n\n'
-        f'🔗 <b>Ваша ссылка:</b>\n<code>{ref_link}</code>\n\n'
-        f'📢 <b>Готовый текст для шеринга:</b>\n<i>{promo}</i>',
+        f'👥 <b>Реферальная программа</b>\n'
+        f'{DIVIDER}\n\n'
+        f'🎯 За каждого приглашённого — <b>+1 день</b> к лицензии\n\n'
+        f'📊 Приглашено: <b>{count} чел.</b>\n'
+        f'🎁 Заработано: <b>+{count} дней</b>\n\n'
+        f'{DIVIDER}\n\n'
+        f'🔗 <b>Ваша ссылка:</b>\n'
+        f'<code>{ref_link}</code>\n\n'
+        f'📢 <b>Готовый текст:</b>\n'
+        f'<i>{promo}</i>',
         reply_markup=kb_back()
     )
 
@@ -359,11 +462,13 @@ async def cb_review(call: CallbackQuery, state: FSMContext):
         return
 
     await call.message.edit_text(
-        '⭐ <b>Оставить отзыв</b>\n\n'
-        'Напишите ваш отзыв о сервисе (несколько предложений).\n'
-        'За отзыв вы получите <b>+2 дня</b> к активной лицензии! 🎁',
+        f'⭐️ <b>Оставить отзыв</b>\n'
+        f'{DIVIDER}\n\n'
+        f'🎁 За отзыв вы получите <b>+2 дня</b> к лицензии!\n\n'
+        f'Напишите несколько предложений о сервисе:\n'
+        f'<i>что понравилось, что помогло, результаты...</i>',
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text='← Отмена', callback_data='menu')]
+            [InlineKeyboardButton(text='✖️ Отмена', callback_data='menu')]
         ])
     )
     await state.set_state(States.waiting_review)
@@ -373,11 +478,18 @@ async def cb_review(call: CallbackQuery, state: FSMContext):
 async def process_review_text(message: Message, state: FSMContext):
     text = message.text.strip()
     if len(text) < 20:
-        await message.answer('❌ Отзыв слишком короткий. Напишите хотя бы пару предложений:')
+        await message.answer(
+            '❌ <b>Отзыв слишком короткий</b>\n\n'
+            'Напишите хотя бы пару предложений:'
+        )
         return
 
     await state.update_data(review_text=text)
-    await message.answer('Отлично! Теперь поставьте оценку:', reply_markup=kb_stars())
+    await message.answer(
+        '👍 <b>Отлично!</b>\n\n'
+        'Теперь поставьте оценку сервису:',
+        reply_markup=kb_stars()
+    )
     await state.set_state(States.review_rating)
 
 
@@ -400,14 +512,16 @@ async def process_review_rating(call: CallbackQuery, state: FSMContext):
     })
 
     await state.clear()
-    stars = '⭐' * rating
+    stars = '★' * rating + '☆' * (5 - rating)
     bonus = result.get('bonus_days', 2)
 
     await call.message.edit_text(
-        f'✅ <b>Отзыв отправлен!</b>\n\n'
-        f'{stars}\n'
+        f'✅ <b>Отзыв отправлен! Спасибо!</b>\n'
+        f'{DIVIDER}\n\n'
+        f'<b>{stars}</b>\n\n'
         f'<i>«{text}»</i>\n\n'
-        f'🎁 +{bonus} дня добавлено к вашей лицензии.\nСпасибо!',
+        f'{DIVIDER}\n\n'
+        f'🎁 <b>+{bonus} дня</b> добавлено к вашей лицензии!',
         reply_markup=kb_back()
     )
 
@@ -416,13 +530,15 @@ async def process_review_rating(call: CallbackQuery, state: FSMContext):
 @dp.message(Command('help'))
 async def cmd_help(message: Message):
     await message.answer(
-        '📖 <b>Команды бота</b>\n\n'
-        '/start — Главное меню\n'
-        '/key — Мои лицензионные ключи\n'
-        '/ref — Реферальная ссылка\n'
-        '/help — Эта справка\n\n'
-        f'🌐 Сайт: {SITE_URL}\n'
-        f'💬 Поддержка: {SUPPORT_URL}'
+        f'{LOGO}\n\n'
+        f'📖 <b>Команды бота</b>\n\n'
+        f'▸ /start — главное меню\n'
+        f'▸ /key — ваши лицензионные ключи\n'
+        f'▸ /ref — реферальная ссылка\n'
+        f'▸ /help — эта справка\n\n'
+        f'{DIVIDER}\n\n'
+        f'🌐 <a href="{SITE_URL}">tgleadwareon.ru</a>\n'
+        f'💬 <a href="{SUPPORT_URL}">Поддержка</a>'
     )
 
 
@@ -433,18 +549,23 @@ async def cmd_key(message: Message):
 
     if not data.get('found'):
         await message.answer(
-            '❌ Аккаунт не привязан. Введите /start и следуйте инструкции.'
+            '❌ <b>Аккаунт не привязан</b>\n\n'
+            'Введите /start и следуйте инструкции.'
         )
         return
 
     active = [l for l in data.get('licenses', []) if not l['is_expired']]
     if not active:
-        await message.answer('❌ Активных лицензий нет.')
+        await message.answer(
+            '🔴 <b>Нет активных лицензий</b>\n\n'
+            'Перейдите в /start и купите подписку.'
+        )
         return
 
-    lines = ['🔑 <b>Ваши ключи:</b>\n']
+    lines = [f'🔑 <b>Ваши ключи</b>\n{DIVIDER}']
     for lic in active:
-        lines.append(f'<b>{lic["product"]}</b>: <code>{lic["license_key"]}</code>')
+        icon = PLAN_ICONS.get(lic['product'], '📦')
+        lines.append(f'\n{icon} <b>{lic["product"]}</b>\n<code>{lic["license_key"]}</code>')
     await message.answer('\n'.join(lines))
 
 
@@ -454,21 +575,25 @@ async def cmd_ref(message: Message):
     data  = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
 
     if not data.get('found'):
-        await message.answer('❌ Аккаунт не привязан. Введите /start.')
+        await message.answer(
+            '❌ <b>Аккаунт не привязан</b>\n\n'
+            'Введите /start и следуйте инструкции.'
+        )
         return
 
     ref_link = data.get('ref_link', '')
     count    = data.get('referral_count', 0)
     await message.answer(
-        f'🎁 <b>Рефералы: {count}</b> · Бонус: +{count} дн.\n\n'
-        f'Ваша ссылка:\n<code>{ref_link}</code>'
+        f'👥 <b>Рефералы</b>\n{DIVIDER}\n\n'
+        f'📊 Приглашено: <b>{count} чел.</b>  ·  Бонус: <b>+{count} дн.</b>\n\n'
+        f'🔗 Ваша ссылка:\n<code>{ref_link}</code>'
     )
 
 
 # ─────────────────────── Scheduler: уведомления ──────────────────
 async def _notify_expiring():
     """Каждые 12 часов проверяет истекающие лицензии и уведомляет пользователей."""
-    await asyncio.sleep(60)  # небольшая задержка на старте
+    await asyncio.sleep(60)
     while True:
         for days in [3, 1]:
             try:
@@ -478,19 +603,25 @@ async def _notify_expiring():
                     if not tg_id:
                         continue
                     try:
+                        icon = PLAN_ICONS.get(u.get('product', ''), '📦')
+                        date = format_date(u.get('expires_at', ''))
+
                         if days == 3:
                             text = (
-                                f'⚠️ <b>Лицензия истекает через 3 дня</b>\n\n'
-                                f'Продукт: <b>{u["product"]}</b>\n'
-                                f'Дата окончания: {u["expires_at"][:10]}\n\n'
+                                f'⚠️ <b>Лицензия истекает через 3 дня</b>\n'
+                                f'{DIVIDER}\n\n'
+                                f'{icon} <b>{u["product"]}</b>\n'
+                                f'📅 Дата окончания: {date}\n\n'
                                 f'Продлите сейчас, чтобы не прерывать работу 👇'
                             )
                         else:
                             text = (
-                                f'🔴 <b>Лицензия истекает СЕГОДНЯ!</b>\n\n'
-                                f'Продукт: <b>{u["product"]}</b>\n\n'
+                                f'🔴 <b>Лицензия истекает СЕГОДНЯ!</b>\n'
+                                f'{DIVIDER}\n\n'
+                                f'{icon} <b>{u["product"]}</b>\n\n'
                                 f'Продлите прямо сейчас 👇'
                             )
+
                         await bot.send_message(
                             tg_id,
                             text,
@@ -498,19 +629,19 @@ async def _notify_expiring():
                                 [InlineKeyboardButton(text='💳 Продлить сейчас', callback_data='buy')]
                             ])
                         )
-                        logging.info(f'Уведомление отправлено: tg={tg_id} product={u["product"]} days={days}')
+                        logging.info(f'Уведомление: tg={tg_id} product={u["product"]} days={days}')
                     except Exception as e:
                         logging.warning(f'Не удалось отправить уведомление {tg_id}: {e}')
             except Exception as e:
                 logging.error(f'Scheduler error (days={days}): {e}')
 
-        await asyncio.sleep(12 * 3600)  # каждые 12 часов
+        await asyncio.sleep(12 * 3600)
 
 
 # ─────────────────────────── Запуск ──────────────────────────────
 async def main():
     if not BOT_TOKEN:
-        raise ValueError('BOT_MAIN_TOKEN не задан в .env')
+        raise ValueError('BOT_TOKEN не задан')
 
     logging.info('🤖 TG Lead Wareon Bot запускается...')
     asyncio.create_task(_notify_expiring())
