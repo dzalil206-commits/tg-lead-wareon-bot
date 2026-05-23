@@ -1,13 +1,5 @@
-# bot_main.py — Главный бот TG Lead Wareon (@TGLeadWareonBot)
-# aiogram 3.x  |  python-dotenv  |  aiohttp
-#
-# Запуск:  python3 bot_main.py
-# На Bothost: указать файл bot_main.py, установить зависимости из requirements_bot.txt
-
-# ===== НАСТРОЙКИ =====
-BOT_TOKEN = "8340651502:AAFur2gI4vgHzmAUPb348F5EF9iD1EgMSEg"
-ADMIN_ID = 5062414502
-SUPPORT_USERNAME = "@winzayartem"
+# Главный бот TG Lead Wareon (@TGLeadWareonBot)
+# aiogram 3.7+  |  aiohttp  |  python-dotenv
 
 import asyncio
 import logging
@@ -35,31 +27,14 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
-# ─────────────────────────── Настройки ───────────────────────────
-# Пробуем все варианты названия переменной с токеном — Bothost может использовать любое
-BOT_TOKEN = (
-    os.environ.get('BOT_MAIN_TOKEN') or
-    os.environ.get('TOKEN') or
-    os.environ.get('BOT_TOKEN') or
-    os.environ.get('TELEGRAM_TOKEN') or
-    os.environ.get('TELEGRAM_BOT_TOKEN') or
-    ''
-)
-API_BASE         = os.environ.get('SITE_API_BASE', 'https://tgleadwareon.ru')
+# ===== НАСТРОЙКИ =====
+BOT_TOKEN        = "8340651502:AAFur2gI4vgHzmAUPb348F5EF9iD1EgMSEg"
+ADMIN_ID         = 5062414502
 BOT_SECRET       = os.environ.get('BOT_MAIN_SECRET', '')
 REVIEW_BOT_TOKEN = os.environ.get('REVIEW_BOT_TOKEN', '')
+API_BASE         = 'https://tgleadwareon.ru'
 SITE_URL         = 'https://tgleadwareon.ru'
 SUPPORT_URL      = 'https://t.me/TGLeadSupportBot'
-
-# Диагностика: покажет в логах все доступные переменные окружения
-logging.info(f'ENV keys available: {sorted(os.environ.keys())}')
-logging.info(f'TOKEN found: {bool(BOT_TOKEN)} | API_BASE: {API_BASE}')
-
-if not BOT_TOKEN:
-    raise RuntimeError(
-        'Токен бота не найден! '
-        'Задайте одну из переменных: BOT_MAIN_TOKEN, TOKEN, BOT_TOKEN, TELEGRAM_TOKEN'
-    )
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp  = Dispatcher(storage=MemoryStorage())
