@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 # ===== НАСТРОЙКИ =====
 BOT_TOKEN        = "8340651502:AAFur2gI4vgHzmAUPb348F5EF9iD1EgMSEg"
 ADMIN_ID         = 5062414502
-BOT_SECRET       = "придумай-строку-32-символа"
+BOT_SECRET       = "tglw_bot_secret_2026"
 REVIEW_BOT_TOKEN = os.environ.get('REVIEW_BOT_TOKEN', '')
 API_BASE         = 'https://tgleadwareon.ru'
 SITE_URL         = 'https://tgleadwareon.ru'
