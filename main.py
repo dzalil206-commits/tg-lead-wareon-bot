@@ -15,6 +15,7 @@ import os
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -60,7 +61,7 @@ if not BOT_TOKEN:
         'Задайте одну из переменных: BOT_MAIN_TOKEN, TOKEN, BOT_TOKEN, TELEGRAM_TOKEN'
     )
 
-bot = Bot(token=BOT_TOKEN, parse_mode='HTML')
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp  = Dispatcher(storage=MemoryStorage())
 
 
