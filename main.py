@@ -4,6 +4,11 @@
 # Запуск:  python3 bot_main.py
 # На Bothost: указать файл bot_main.py, установить зависимости из requirements_bot.txt
 
+# ===== НАСТРОЙКИ =====
+BOT_TOKEN = "8340651502:AAFur2gI4vgHzmAUPb348F5EF9iD1EgMSEg"
+ADMIN_ID = 5062414502
+SUPPORT_USERNAME = "@winzayartem"
+
 import asyncio
 import logging
 import os
