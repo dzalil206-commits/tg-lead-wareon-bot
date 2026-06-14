@@ -37,6 +37,10 @@ REVIEW_BOT_TOKEN = os.environ.get('REVIEW_BOT_TOKEN', '')
 API_BASE         = 'https://tgleadwareon.ru'
 SITE_URL         = 'https://tgleadwareon.ru'
 SUPPORT_URL      = 'https://t.me/TGLeadSupportBot'
+CHANNEL_URL      = os.environ.get('CHANNEL_URL', 'https://t.me/TGLeadWareon')
+# Канал обязательной подписки. Бот ДОЛЖЕН быть администратором этого канала,
+# иначе проверка подписки работать не будет (тогда гейт пропускает всех).
+CHANNEL_ID       = os.environ.get('CHANNEL_ID', '@TGLeadWareon')
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp  = Dispatcher(storage=MemoryStorage())
@@ -203,11 +207,47 @@ def kb_stars() -> InlineKeyboardMarkup:
     ])
 
 
+# ─────────────────────── Обязательная подписка ───────────────────
+def kb_subscribe() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='📢 Подписаться на канал', url=CHANNEL_URL)],
+        [InlineKeyboardButton(text='✅ Проверить подписку',   callback_data='check_sub')],
+    ])
+
+
+async def is_subscribed(user_id: int) -> bool:
+    """Проверяет подписку на канал. Если бот не админ / ошибка — пропускает (fail-open)."""
+    try:
+        member = await bot.get_chat_member(CHANNEL_ID, user_id)
+        return member.status in ('member', 'administrator', 'creator')
+    except Exception as e:
+        logging.warning(f'Проверка подписки {user_id}: {e} (бот должен быть админом канала)')
+        return True
+
+
+def _sub_gate_text() -> str:
+    return (
+        f'{LOGO}\n\n'
+        f'🚀 <b>Твой центр роста в Telegram</b>\n\n'
+        f'🌐 Прокси · 👤 Аккаунты · 🎯 Сбор аудитории · 📨 Умные рассылки — '
+        f'всё в одном боте, без рутины.\n'
+        f'⚡ Запусти поток целевого трафика быстро и просто.\n\n'
+        f'{DIVIDER}\n\n'
+        f'🔒 <b>Чтобы начать пользоваться ботом — подпишитесь на канал</b>\n\n'
+        f'<i>Там обновления, кейсы и фишки сервиса.</i>'
+    )
+
+
 # ─────────────────────────── /start ──────────────────────────────
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    tg_id = str(message.from_user.id)
+
+    # Гейт обязательной подписки
+    if not await is_subscribed(message.from_user.id):
+        await message.answer(_sub_gate_text(), reply_markup=kb_subscribe(),
+                             disable_web_page_preview=True)
+        return
 
     # Deep link для QR-привязки: /start link_XXXXXX
     args = message.text.split(maxsplit=1)
@@ -215,42 +255,61 @@ async def cmd_start(message: Message, state: FSMContext):
         await _handle_link_code(message, state, args[1][5:])
         return
 
-    data = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
+    await _enter_app(message.from_user, state, answer_msg=message)
+
+
+async def _enter_app(from_user, state: FSMContext, answer_msg=None, edit_call=None):
+    """Показывает домашний экран после подтверждения подписки."""
+    tg_id = str(from_user.id)
+    data  = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
 
     if data.get('found'):
         name     = data['user']['name']
-        licenses = data.get('licenses', [])
-        active   = [l for l in licenses if not l['is_expired']]
-
+        active   = [l for l in data.get('licenses', []) if not l['is_expired']]
         if active:
-            # Ближайшее истечение
             soonest   = min(active, key=lambda l: l['days_left'])
             lic_count = f'🟢 Активна  ·  {len(active)} {"лицензия" if len(active) == 1 else "лицензии" if len(active) < 5 else "лицензий"}'
             exp_line  = f'📅 До {format_date(soonest["expires_at"])}'
         else:
             lic_count = '🔴 Нет активных лицензий'
-            exp_line  = f'💡 Перейдите в «Купить / Продлить»'
-
-        await message.answer(
+            exp_line  = '💡 Перейдите в «Купить / Продлить»'
+        text = (
             f'{LOGO}\n\n'
             f'👋 Привет, <b>{name}</b>!\n\n'
             f'{lic_count}\n'
             f'{exp_line}\n\n'
-            f'Выберите раздел 👇',
-            reply_markup=kb_main()
+            f'Выберите раздел 👇'
         )
+        if edit_call:
+            await edit_call.message.edit_text(text, reply_markup=kb_main())
+        else:
+            await answer_msg.answer(text, reply_markup=kb_main())
     else:
-        await message.answer(
+        text = (
             f'{LOGO}\n\n'
             f'👋 Добро пожаловать!\n\n'
-            f'Управляйте лицензиями, получайте ключи\n'
-            f'и следите за подпиской — без захода на сайт.\n\n'
+            f'Прокси · Аккаунты · Сбор аудитории · Умные рассылки —\n'
+            f'всё в одном боте.\n\n'
             f'{DIVIDER}\n\n'
             f'📧 Введите <b>email</b>, с которым вы\n'
             f'зарегистрированы на сайте:\n\n'
             f'<i>Нет аккаунта? → <a href="{SITE_URL}/register">Регистрация</a></i>'
         )
+        if edit_call:
+            await edit_call.message.edit_text(text, disable_web_page_preview=True)
+        else:
+            await answer_msg.answer(text, disable_web_page_preview=True)
         await state.set_state(States.waiting_email)
+
+
+# ─────────────────────────── Проверка подписки ───────────────────
+@dp.callback_query(F.data == 'check_sub')
+async def cb_check_sub(call: CallbackQuery, state: FSMContext):
+    if await is_subscribed(call.from_user.id):
+        await call.answer('Спасибо за подписку! 🎉')
+        await _enter_app(call.from_user, state, edit_call=call)
+    else:
+        await call.answer('Вы ещё не подписались на канал 😔', show_alert=True)
 
 
 async def _handle_link_code(message: Message, state: FSMContext, code: str):
