@@ -215,6 +215,17 @@ def kb_subscribe() -> InlineKeyboardMarkup:
     ])
 
 
+def kb_home() -> InlineKeyboardMarkup:
+    """Лаконичный стартовый экран — одна крупная CTA, функции спрятаны за ней."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🚀 Начать работу сейчас', callback_data='menu')],
+        [
+            InlineKeyboardButton(text='👤 Профиль',  callback_data='profile'),
+            InlineKeyboardButton(text='💬 Поддержка', url=SUPPORT_URL),
+        ],
+    ])
+
+
 async def is_subscribed(user_id: int) -> bool:
     """Проверяет подписку на канал. Если бот не админ / ошибка — пропускает (fail-open)."""
     try:
@@ -278,12 +289,14 @@ async def _enter_app(from_user, state: FSMContext, answer_msg=None, edit_call=No
             f'👋 Привет, <b>{name}</b>!\n\n'
             f'{lic_count}\n'
             f'{exp_line}\n\n'
-            f'Выберите раздел 👇'
+            f'🌐 Прокси · 👤 Аккаунты · 🎯 Аудитория · 📨 Рассылка —\n'
+            f'всё в одном боте, без рутины.\n\n'
+            f'Нажми кнопку ниже, чтобы начать 👇'
         )
         if edit_call:
-            await edit_call.message.edit_text(text, reply_markup=kb_main())
+            await edit_call.message.edit_text(text, reply_markup=kb_home())
         else:
-            await answer_msg.answer(text, reply_markup=kb_main())
+            await answer_msg.answer(text, reply_markup=kb_home())
     else:
         text = (
             f'{LOGO}\n\n'
