@@ -114,15 +114,60 @@ async def api(method: str, path: str, **kwargs) -> dict:
 # ─────────────────────────── Клавиатуры ──────────────────────────
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text='🌐 Прокси',   callback_data='proxies'),
+            InlineKeyboardButton(text='👤 Аккаунты', callback_data='accounts'),
+        ],
+        [
+            InlineKeyboardButton(text='🎯 Аудитория', callback_data='audience'),
+            InlineKeyboardButton(text='📨 Рассылка',  callback_data='sending'),
+        ],
+        [InlineKeyboardButton(text='🚀 Как начать (4 шага)',     callback_data='howto')],
         [InlineKeyboardButton(text='🛡 Мои лицензии',            callback_data='licenses')],
-        [InlineKeyboardButton(text='💳 Купить / Продлить',        callback_data='buy')],
-        [InlineKeyboardButton(text='🔑 Ключ активации',           callback_data='get_key')],
+        [
+            InlineKeyboardButton(text='💳 Купить / Продлить', callback_data='buy'),
+            InlineKeyboardButton(text='🔑 Ключ',              callback_data='get_key'),
+        ],
         [InlineKeyboardButton(text='👥 Реферальная программа',    callback_data='referral')],
         [
             InlineKeyboardButton(text='⭐️ Отзыв  +2 дня', callback_data='review'),
             InlineKeyboardButton(text='💬 Поддержка',      url=SUPPORT_URL),
         ],
     ])
+
+
+def kb_section(*rows) -> InlineKeyboardMarkup:
+    kb = [list(r) for r in rows]
+    kb.append([InlineKeyboardButton(text='🏠 Главное меню', callback_data='menu')])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+async def _require_account(call: CallbackQuery):
+    """Гейтинг продуктовых разделов: нужна привязка аккаунта + активная лицензия."""
+    tg_id = str(call.from_user.id)
+    data  = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
+    if not data.get('found'):
+        await call.message.edit_text(
+            f'🔒 <b>Сначала привяжите аккаунт</b>\n{DIVIDER}\n\n'
+            f'Нажмите /start и введите email сайта.\n\n'
+            f'<i>Нет аккаунта? → <a href="{SITE_URL}/register">Регистрация — 3 дня бесплатно</a></i>',
+            reply_markup=kb_back()
+        )
+        return None
+    active = [l for l in data.get('licenses', []) if not l['is_expired']]
+    if not active:
+        await call.message.edit_text(
+            f'⏳ <b>Нет активной лицензии</b>\n{DIVIDER}\n\n'
+            f'Инструменты доступны на платном тарифе или в пробном периоде.\n'
+            f'Активируйте доступ — и возвращайтесь 👇',
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text='💳 Выбрать тариф',            callback_data='buy')],
+                [InlineKeyboardButton(text='👥 Получить дни (рефералы)',  callback_data='referral')],
+                [InlineKeyboardButton(text='🏠 Главное меню',             callback_data='menu')],
+            ])
+        )
+        return None
+    return data
 
 
 def kb_back() -> InlineKeyboardMarkup:
@@ -310,6 +355,118 @@ async def cb_menu(call: CallbackQuery, state: FSMContext):
         text = f'{LOGO}\n\nВыберите раздел 👇'
 
     await call.message.edit_text(text, reply_markup=kb_main())
+
+
+# ─────────────────────────── Как начать (онбординг) ──────────────
+@dp.callback_query(F.data == 'howto')
+async def cb_howto(call: CallbackQuery):
+    await call.message.edit_text(
+        f'🚀 <b>Как начать? Проще, чем кажется</b>\n{DIVIDER}\n\n'
+        f'<b>{{ 1 }}</b> 🌐 Добавьте прокси\n'
+        f'<i>чтобы аккаунты работали стабильно и безопасно</i>\n\n'
+        f'<b>{{ 2 }}</b> 👤 Подключите аккаунты\n'
+        f'<i>по номеру телефона или импортом сессии</i>\n\n'
+        f'<b>{{ 3 }}</b> 🎯 Соберите базу юзеров/чатов\n'
+        f'<i>автоматически из открытых чатов и каналов</i>\n\n'
+        f'<b>{{ 4 }}</b> 📨 Запустите рассылку по базам\n'
+        f'<i>с имитацией человека и AI-вариантами текста</i>\n\n'
+        f'{DIVIDER}\n'
+        f'📚 В каждом разделе есть подробные инструкции.',
+        reply_markup=kb_section(
+            [
+                InlineKeyboardButton(text='🌐 Прокси',   callback_data='proxies'),
+                InlineKeyboardButton(text='👤 Аккаунты', callback_data='accounts'),
+            ],
+            [
+                InlineKeyboardButton(text='🎯 Аудитория', callback_data='audience'),
+                InlineKeyboardButton(text='📨 Рассылка',  callback_data='sending'),
+            ],
+        )
+    )
+
+
+# ─────────────────────────── Прокси ──────────────────────────────
+@dp.callback_query(F.data == 'proxies')
+async def cb_proxies(call: CallbackQuery):
+    if not await _require_account(call):
+        return
+    await call.message.edit_text(
+        f'🌐 <b>Прокси</b>\n{DIVIDER}\n\n'
+        f'Прокси нужны, чтобы аккаунты работали стабильно и не попадали под ограничения.\n\n'
+        f'<b>Форматы:</b>\n'
+        f'<code>socks5://user:pass@host:port</code>\n'
+        f'<code>host:port:login:password</code>\n\n'
+        f'📖 <b>Инструкция:</b> добавьте прокси списком, проверьте на валидность и '
+        f'распределите по аккаунтам — последовательно или случайно.\n\n'
+        f'<i>Интерактивное управление прямо в боте подключается.</i>',
+        reply_markup=kb_section(
+            [InlineKeyboardButton(text='🛒 Купить прокси',        url=f'{SITE_URL}/buy_proxy')],
+            [InlineKeyboardButton(text='🌐 Открыть в кабинете',   url=f'{SITE_URL}/dashboard')],
+        )
+    )
+
+
+# ─────────────────────────── Аккаунты ────────────────────────────
+@dp.callback_query(F.data == 'accounts')
+async def cb_accounts(call: CallbackQuery):
+    if not await _require_account(call):
+        return
+    await call.message.edit_text(
+        f'👤 <b>Аккаунты</b>\n{DIVIDER}\n\n'
+        f'Подключите Telegram-аккаунты для сбора аудитории и рассылок.\n\n'
+        f'<b>Способы подключения:</b>\n'
+        f'• по номеру телефона (код + 2FA)\n'
+        f'• импорт .session / TData\n\n'
+        f'📖 <b>Инструкция:</b> привяжите прокси к аккаунту, проверьте статус '
+        f'(жив / ограничен / требует входа), настройте профиль и прогрев.\n\n'
+        f'<i>Подключение аккаунтов прямо в боте подключается.</i>',
+        reply_markup=kb_section(
+            [InlineKeyboardButton(text='🌐 Открыть в кабинете', url=f'{SITE_URL}/dashboard')],
+        )
+    )
+
+
+# ─────────────────────────── Аудитория ───────────────────────────
+@dp.callback_query(F.data == 'audience')
+async def cb_audience(call: CallbackQuery):
+    if not await _require_account(call):
+        return
+    await call.message.edit_text(
+        f'🎯 <b>Аудитория</b>\n{DIVIDER}\n\n'
+        f'Соберите целевую базу из открытых чатов и каналов автоматически.\n\n'
+        f'<b>Что собирается:</b> username, ID, имя, активность.\n'
+        f'<b>Фильтры:</b> онлайн-статус, язык, активность.\n\n'
+        f'📖 <b>Инструкция:</b> укажите чаты/каналы → запустите сбор → получите готовую '
+        f'базу для рассылки.\n\n'
+        f'⚖️ Сбор — только из <b>открытых</b> источников. Ответственность за дальнейшую '
+        f'обработку данных — на вас.\n\n'
+        f'<i>Запуск сбора прямо в боте подключается.</i>',
+        reply_markup=kb_section(
+            [InlineKeyboardButton(text='🌐 Открыть в кабинете', url=f'{SITE_URL}/dashboard')],
+        )
+    )
+
+
+# ─────────────────────────── Рассылка ────────────────────────────
+@dp.callback_query(F.data == 'sending')
+async def cb_sending(call: CallbackQuery):
+    if not await _require_account(call):
+        return
+    await call.message.edit_text(
+        f'📨 <b>Рассылка</b>\n{DIVIDER}\n\n'
+        f'Запустите умную рассылку по собранным базам.\n\n'
+        f'<b>Возможности:</b>\n'
+        f'• персонализация, spintax, AI-варианты текста\n'
+        f'• имитация человека: «печатает», задержки, паузы\n'
+        f'• чередование вариантов по весам, антидубли\n'
+        f'• статистика доставки и логи\n\n'
+        f'📖 <b>Инструкция:</b> выберите аккаунт → базу → текст → лимиты → запуск.\n\n'
+        f'⚖️ Рассылки — только тем, кто дал согласие (38-ФЗ). Спам запрещён.\n\n'
+        f'<i>Запуск рассылок прямо в боте подключается.</i>',
+        reply_markup=kb_section(
+            [InlineKeyboardButton(text='🌐 Открыть в кабинете', url=f'{SITE_URL}/dashboard')],
+        )
+    )
 
 
 # ─────────────────────────── Мои лицензии ────────────────────────
