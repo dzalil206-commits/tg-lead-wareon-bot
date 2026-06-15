@@ -65,6 +65,25 @@ def status_badge(days: int) -> str:
     return f'🟢 Активна · {days} дн.'
 
 
+def progress_bar(fraction: float, length: int = 10) -> str:
+    """Визуальный бар: ▰▰▰▰▱▱▱▱▱▱"""
+    fraction = max(0.0, min(1.0, fraction))
+    filled   = round(fraction * length)
+    return '▰' * filled + '▱' * (length - filled)
+
+
+def license_progress(lic: dict) -> str:
+    """Бар оставшегося срока лицензии."""
+    try:
+        created = datetime.fromisoformat(lic['created_at'][:10])
+        expires = datetime.fromisoformat(lic['expires_at'][:10])
+        total   = (expires - created).days or 1
+        left    = lic['days_left']
+        return progress_bar(left / total)
+    except Exception:
+        return progress_bar(1.0 if lic.get('days_left', 0) > 0 else 0.0)
+
+
 def format_date(iso: str) -> str:
     months = ['', 'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
               'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
@@ -86,11 +105,12 @@ async def db_init():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript('''
             CREATE TABLE IF NOT EXISTS users (
-                tg_id       TEXT PRIMARY KEY,
-                first_name  TEXT    DEFAULT '',
-                username    TEXT    DEFAULT '',
-                referred_by TEXT,
-                joined_at   TEXT    DEFAULT (datetime('now'))
+                tg_id          TEXT PRIMARY KEY,
+                first_name     TEXT    DEFAULT '',
+                username       TEXT    DEFAULT '',
+                referred_by    TEXT,
+                notify_enabled INTEGER DEFAULT 1,
+                joined_at      TEXT    DEFAULT (datetime('now'))
             );
             CREATE TABLE IF NOT EXISTS licenses (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +130,11 @@ async def db_init():
             );
             CREATE INDEX IF NOT EXISTS idx_lic_tg ON licenses(tg_id);
         ''')
+        # Ленивая миграция для старых баз
+        try:
+            await db.execute('ALTER TABLE users ADD COLUMN notify_enabled INTEGER DEFAULT 1')
+        except Exception:
+            pass
         await db.commit()
 
 
@@ -190,6 +215,30 @@ async def db_referral_count(tg_id: str) -> int:
         async with db.execute('SELECT COUNT(*) FROM users WHERE referred_by=?', (tg_id,)) as cur:
             row = await cur.fetchone()
             return row[0] if row else 0
+
+
+async def db_review_count(tg_id: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT COUNT(*) FROM reviews WHERE tg_id=?', (tg_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+
+async def db_get_notify(tg_id: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT notify_enabled FROM users WHERE tg_id=?', (tg_id,)) as cur:
+            row = await cur.fetchone()
+            return bool(row[0]) if row and row[0] is not None else True
+
+
+async def db_toggle_notify(tg_id: str) -> bool:
+    """Инвертирует флаг уведомлений, возвращает новое значение."""
+    current = await db_get_notify(tg_id)
+    new_val = 0 if current else 1
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('UPDATE users SET notify_enabled=? WHERE tg_id=?', (new_val, tg_id))
+        await db.commit()
+    return bool(new_val)
 
 
 async def db_expiring_today(days_ahead: int) -> list[dict]:
@@ -439,35 +488,90 @@ async def cb_menu(call: CallbackQuery, state: FSMContext):
 
 # ==================== ПРОФИЛЬ ====================
 
-@dp.callback_query(F.data == 'profile')
-async def cb_profile(call: CallbackQuery):
-    tg_id    = str(call.from_user.id)
+async def _profile_view(tg_id: str, from_user) -> tuple[str, InlineKeyboardMarkup]:
     user     = await db_get_user(tg_id)
     licenses = await db_get_licenses(tg_id)
     active   = [l for l in licenses if not l['is_expired']]
+    ref_cnt  = await db_referral_count(tg_id)
+    rev_cnt  = await db_review_count(tg_id)
+    notify   = await db_get_notify(tg_id)
 
-    name     = call.from_user.first_name or '—'
-    username = f'@{call.from_user.username}' if call.from_user.username else '—'
-    joined   = format_date(user['joined_at'][:10]) if user else '—'
+    name     = from_user.first_name or '—'
+    username = f'@{from_user.username}' if from_user.username else '—'
+    joined   = format_date(user['joined_at']) if user else '—'
+
+    # Статус-плашка
+    if active:
+        plan_names = ' · '.join(sorted({l['product'] for l in active}))
+        status     = f'💎 <b>PREMIUM</b> · {plan_names}'
+    else:
+        status     = '🆓 <b>FREE</b> · без активной подписки'
+
+    lines = [
+        f'👤 <b>Личный кабинет</b>',
+        DIVIDER,
+        '',
+        status,
+        '',
+        f'<b>Имя:</b> {name}',
+        f'<b>Username:</b> {username}',
+        f'<b>ID:</b> <code>{tg_id}</code>',
+        f'<b>В боте с:</b> {joined}',
+        '',
+        DIVIDER,
+        '🛡 <b>Подписки</b>',
+    ]
 
     if active:
-        lic_text = '\n'.join(
-            f'   {PLAN_ICONS.get(l["product"], "📦")} <b>{l["product"]}</b>'
-            f' — до {format_date(l["expires_at"])}'
-            for l in active
-        )
+        for l in active:
+            icon = PLAN_ICONS.get(l['product'], '📦')
+            bar  = license_progress(l)
+            lines.append(
+                f'\n{icon} <b>{l["product"]}</b> · {status_badge(l["days_left"])}\n'
+                f'   {bar}\n'
+                f'   📅 до {format_date(l["expires_at"])}'
+            )
     else:
-        lic_text = '   🔴 Нет активных лицензий'
+        lines.append('\n🔴 Нет активных подписок\n   Оформите доступ, чтобы открыть инструменты.')
 
-    await call.message.edit_text(
-        f'👤 <b>Профиль</b>\n{DIVIDER}\n\n'
-        f'<b>Имя:</b> {name}\n'
-        f'<b>Username:</b> {username}\n'
-        f'<b>Telegram ID:</b> <code>{tg_id}</code>\n'
-        f'<b>В боте с:</b> {joined}\n\n'
-        f'🛡 <b>Лицензии:</b>\n{lic_text}',
-        reply_markup=kb_back()
-    )
+    lines += [
+        '',
+        DIVIDER,
+        '📈 <b>Активность</b>',
+        f'👥 Рефералов: <b>{ref_cnt}</b>  ·  🎁 заработано <b>+{ref_cnt} дн.</b>',
+        f'⭐️ Отзывов: <b>{rev_cnt}</b>',
+    ]
+
+    text = '\n'.join(lines)
+    notify_label = '🔔 Уведомления: ВКЛ' if notify else '🔕 Уведомления: ВЫКЛ'
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text='🛡 Мои лицензии', callback_data='licenses'),
+            InlineKeyboardButton(text='🔑 Ключи',        callback_data='get_key'),
+        ],
+        [
+            InlineKeyboardButton(text='👥 Рефералы',  callback_data='referral'),
+            InlineKeyboardButton(text='⭐️ Отзыв',     callback_data='review'),
+        ],
+        [InlineKeyboardButton(text=notify_label, callback_data='profile_notify')],
+        [InlineKeyboardButton(text='💳 Купить / Продлить', callback_data='buy')],
+        [InlineKeyboardButton(text='🏠 Главное меню',      callback_data='menu')],
+    ])
+    return text, kb
+
+
+@dp.callback_query(F.data == 'profile')
+async def cb_profile(call: CallbackQuery):
+    text, kb = await _profile_view(str(call.from_user.id), call.from_user)
+    await call.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+
+
+@dp.callback_query(F.data == 'profile_notify')
+async def cb_profile_notify(call: CallbackQuery):
+    new_val = await db_toggle_notify(str(call.from_user.id))
+    await call.answer('🔔 Напоминания включены' if new_val else '🔕 Напоминания выключены')
+    text, kb = await _profile_view(str(call.from_user.id), call.from_user)
+    await call.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
 
 
 # ==================== ОНБОРДИНГ ====================
@@ -983,6 +1087,8 @@ async def _notify_expiring():
                 for u in users:
                     tg_id = u.get('tg_id')
                     if not tg_id:
+                        continue
+                    if not await db_get_notify(tg_id):
                         continue
                     icon = PLAN_ICONS.get(u.get('product', ''), '📦')
                     date = format_date(u.get('expires_at', ''))
