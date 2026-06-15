@@ -1,11 +1,15 @@
 # Главный бот TG Lead Wareon (@TGLeadWareonBot)
-# aiogram 3.7+  |  aiohttp  |  python-dotenv
+# aiogram 3.7+  |  aiosqlite  |  python-dotenv
+# Полностью автономный — без зависимости от сайта
 
 import asyncio
 import logging
 import os
+import secrets
+import string
+from datetime import datetime, timedelta
 
-import aiohttp
+import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
@@ -18,8 +22,6 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web
 
 try:
     from dotenv import load_dotenv
@@ -30,62 +32,40 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 # ===== НАСТРОЙКИ =====
-BOT_TOKEN        = "8340651502:AAFur2gI4vgHzmAUPb348F5EF9iD1EgMSEg"
-ADMIN_ID         = 5062414502
-BOT_SECRET       = "tglw_bot_secret_2026"
-REVIEW_BOT_TOKEN = os.environ.get('REVIEW_BOT_TOKEN', '')
-API_BASE         = 'https://tgleadwareon.ru'
-SITE_URL         = 'https://tgleadwareon.ru'
-SUPPORT_URL      = 'https://t.me/TGLeadSupportBot'
-CHANNEL_URL      = os.environ.get('CHANNEL_URL', 'https://t.me/TGLeadWareon')
-# Канал обязательной подписки. Бот ДОЛЖЕН быть администратором этого канала,
-# иначе проверка подписки работать не будет (тогда гейт пропускает всех).
-CHANNEL_ID       = os.environ.get('CHANNEL_ID', '@TGLeadWareon')
+BOT_TOKEN   = os.environ.get('BOT_TOKEN',   '8340651502:AAFur2gI4vgHzmAUPb348F5EF9iD1EgMSEg')
+ADMIN_ID    = int(os.environ.get('ADMIN_ID', '5062414502'))
+SUPPORT_URL = os.environ.get('SUPPORT_URL', 'https://t.me/TGLeadSupportBot')
+CHANNEL_URL = os.environ.get('CHANNEL_URL', 'https://t.me/TGLeadWareon')
+CHANNEL_ID  = os.environ.get('CHANNEL_ID',  '@TGLeadWareon')
+DB_PATH     = os.environ.get('DB_PATH',     'bot_data.db')
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp  = Dispatcher(storage=MemoryStorage())
 
 # ===== ДИЗАЙН =====
-DIVIDER  = '━━━━━━━━━━━━━━━━━━━━━━'
-LOGO     = f'{DIVIDER}\n    🔥 <b>TG LEAD WAREON</b>\n{DIVIDER}'
+DIVIDER = '━━━━━━━━━━━━━━━━━━━━━━'
+LOGO    = f'{DIVIDER}\n    🔥 <b>TG LEAD WAREON</b>\n{DIVIDER}'
 
-PLAN_ICONS = {
-    'Miner':  '⛏️',
-    'Sender': '📨',
-    'Start':  '🚀',
-    'Pro':    '⚡',
-    'Scale':  '👑',
-}
-
-PLAN_DESC = {
+PLAN_ICONS = {'Miner': '⛏️', 'Sender': '📨', 'Start': '🚀', 'Pro': '⚡', 'Scale': '👑'}
+PLAN_DESC  = {
     'Miner':  'парсинг аудитории',
     'Sender': 'массовые рассылки',
     'Start':  'Miner + Sender',
     'Pro':    'Start + лимиты ×3',
     'Scale':  'всё включено',
 }
-
-PLAN_PRICE = {
-    'Miner':  '490',
-    'Sender': '990',
-    'Start':  '990',
-    'Pro':    '2 490',
-    'Scale':  '6 990',
-}
+PLAN_PRICE = {'Miner': '490', 'Sender': '990', 'Start': '990', 'Pro': '2 490', 'Scale': '6 990'}
 
 
 def status_badge(days: int) -> str:
-    """Возвращает цветной индикатор статуса лицензии."""
     if days <= 0:
         return '🔴 Истекла'
-    elif days <= 3:
+    if days <= 3:
         return f'🟡 Истекает через {days} дн.'
-    else:
-        return f'🟢 Активна · {days} дн.'
+    return f'🟢 Активна · {days} дн.'
 
 
 def format_date(iso: str) -> str:
-    """2026-06-15 → 15 июня 2026"""
     months = ['', 'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
               'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
     try:
@@ -95,83 +75,184 @@ def format_date(iso: str) -> str:
         return iso[:10]
 
 
-# ─────────────────────────── FSM состояния ───────────────────────
+def _gen_key() -> str:
+    chars = string.ascii_uppercase + string.digits
+    return '-'.join(''.join(secrets.choice(chars) for _ in range(5)) for _ in range(4))
+
+
+# ==================== БАЗА ДАННЫХ ====================
+
+async def db_init():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript('''
+            CREATE TABLE IF NOT EXISTS users (
+                tg_id       TEXT PRIMARY KEY,
+                first_name  TEXT    DEFAULT '',
+                username    TEXT    DEFAULT '',
+                referred_by TEXT,
+                joined_at   TEXT    DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS licenses (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_id       TEXT NOT NULL,
+                product     TEXT NOT NULL,
+                license_key TEXT NOT NULL,
+                expires_at  TEXT NOT NULL,
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS reviews (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_id      TEXT NOT NULL,
+                username   TEXT DEFAULT '',
+                rating     INTEGER,
+                body       TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_lic_tg ON licenses(tg_id);
+        ''')
+        await db.commit()
+
+
+async def db_ensure_user(tg_id: str, first_name: str = '', username: str = '', referred_by: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            'INSERT OR IGNORE INTO users (tg_id, first_name, username, referred_by) VALUES (?,?,?,?)',
+            (tg_id, first_name, username, referred_by)
+        )
+        await db.commit()
+
+
+async def db_get_user(tg_id: str) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute('SELECT * FROM users WHERE tg_id=?', (tg_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def db_get_licenses(tg_id: str) -> list[dict]:
+    today = datetime.utcnow().date().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            'SELECT *, CAST((julianday(expires_at) - julianday(?)) AS INTEGER) AS days_left '
+            'FROM licenses WHERE tg_id=? ORDER BY expires_at',
+            (today, tg_id)
+        ) as cur:
+            rows = await cur.fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d['days_left'] = max(0, d['days_left'] or 0)
+        d['is_expired'] = d['days_left'] <= 0
+        result.append(d)
+    return result
+
+
+async def db_add_license(tg_id: str, product: str, days: int) -> str:
+    key     = _gen_key()
+    expires = (datetime.utcnow() + timedelta(days=days)).date().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            'INSERT INTO licenses (tg_id, product, license_key, expires_at) VALUES (?,?,?,?)',
+            (tg_id, product, key, expires)
+        )
+        await db.commit()
+    return key
+
+
+async def db_add_days(tg_id: str, product: str, days: int):
+    """Продлевает действующую лицензию на N дней или создаёт новую."""
+    today = datetime.utcnow().date().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            'SELECT id, expires_at FROM licenses WHERE tg_id=? AND product=? AND expires_at>=? '
+            'ORDER BY expires_at DESC LIMIT 1',
+            (tg_id, product, today)
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            lic_id, exp = row
+            new_exp = (datetime.fromisoformat(exp) + timedelta(days=days)).date().isoformat()
+            await db.execute('UPDATE licenses SET expires_at=? WHERE id=?', (new_exp, lic_id))
+        else:
+            key     = _gen_key()
+            new_exp = (datetime.utcnow() + timedelta(days=days)).date().isoformat()
+            await db.execute(
+                'INSERT INTO licenses (tg_id, product, license_key, expires_at) VALUES (?,?,?,?)',
+                (tg_id, product, key, new_exp)
+            )
+        await db.commit()
+
+
+async def db_referral_count(tg_id: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT COUNT(*) FROM users WHERE referred_by=?', (tg_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+
+async def db_expiring_today(days_ahead: int) -> list[dict]:
+    target = (datetime.utcnow() + timedelta(days=days_ahead)).date().isoformat()
+    today  = datetime.utcnow().date().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            'SELECT tg_id, product, expires_at FROM licenses '
+            'WHERE date(expires_at)=? AND expires_at>=?',
+            (target, today)
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+# ==================== FSM ====================
+
 class States(StatesGroup):
-    waiting_email  = State()
     waiting_review = State()
     review_rating  = State()
 
 
-# ─────────────────────────── API helper ──────────────────────────
-async def api(method: str, path: str, **kwargs) -> dict:
-    kwargs.setdefault('headers', {})['X-Bot-Secret'] = BOT_SECRET
-    timeout = aiohttp.ClientTimeout(total=8)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as s:
-            async with getattr(s, method)(f'{API_BASE}{path}', **kwargs) as r:
-                return await r.json()
-    except Exception as e:
-        logging.error(f'API {method.upper()} {path} — {e}')
-        return {}
+# ==================== КЛАВИАТУРЫ ====================
+
+def kb_subscribe() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='📢 Подписаться на канал', url=CHANNEL_URL)],
+        [InlineKeyboardButton(text='✅ Проверить подписку',   callback_data='check_sub')],
+    ])
 
 
-# ─────────────────────────── Клавиатуры ──────────────────────────
+def kb_home() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🚀 Начать работу сейчас', callback_data='menu')],
+        [
+            InlineKeyboardButton(text='👤 Профиль',   callback_data='profile'),
+            InlineKeyboardButton(text='💬 Поддержка', url=SUPPORT_URL),
+        ],
+    ])
+
+
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text='🌐 Прокси',   callback_data='proxies'),
-            InlineKeyboardButton(text='👤 Аккаунты', callback_data='accounts'),
+            InlineKeyboardButton(text='🌐 Прокси',    callback_data='proxies'),
+            InlineKeyboardButton(text='👤 Аккаунты',  callback_data='accounts'),
         ],
         [
             InlineKeyboardButton(text='🎯 Аудитория', callback_data='audience'),
             InlineKeyboardButton(text='📨 Рассылка',  callback_data='sending'),
         ],
-        [InlineKeyboardButton(text='🚀 Как начать (4 шага)',     callback_data='howto')],
-        [InlineKeyboardButton(text='🛡 Мои лицензии',            callback_data='licenses')],
+        [InlineKeyboardButton(text='🚀 Как начать (4 шага)', callback_data='howto')],
+        [InlineKeyboardButton(text='🛡 Мои лицензии',         callback_data='licenses')],
         [
             InlineKeyboardButton(text='💳 Купить / Продлить', callback_data='buy'),
             InlineKeyboardButton(text='🔑 Ключ',              callback_data='get_key'),
         ],
-        [InlineKeyboardButton(text='👥 Реферальная программа',    callback_data='referral')],
+        [InlineKeyboardButton(text='👥 Реферальная программа', callback_data='referral')],
         [
             InlineKeyboardButton(text='⭐️ Отзыв  +2 дня', callback_data='review'),
             InlineKeyboardButton(text='💬 Поддержка',      url=SUPPORT_URL),
         ],
     ])
-
-
-def kb_section(*rows) -> InlineKeyboardMarkup:
-    kb = [list(r) for r in rows]
-    kb.append([InlineKeyboardButton(text='🏠 Главное меню', callback_data='menu')])
-    return InlineKeyboardMarkup(inline_keyboard=kb)
-
-
-async def _require_account(call: CallbackQuery):
-    """Гейтинг продуктовых разделов: нужна привязка аккаунта + активная лицензия."""
-    tg_id = str(call.from_user.id)
-    data  = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
-    if not data.get('found'):
-        await call.message.edit_text(
-            f'🔒 <b>Сначала привяжите аккаунт</b>\n{DIVIDER}\n\n'
-            f'Нажмите /start и введите email сайта.\n\n'
-            f'<i>Нет аккаунта? → <a href="{SITE_URL}/register">Регистрация — 3 дня бесплатно</a></i>',
-            reply_markup=kb_back()
-        )
-        return None
-    active = [l for l in data.get('licenses', []) if not l['is_expired']]
-    if not active:
-        await call.message.edit_text(
-            f'⏳ <b>Нет активной лицензии</b>\n{DIVIDER}\n\n'
-            f'Инструменты доступны на платном тарифе или в пробном периоде.\n'
-            f'Активируйте доступ — и возвращайтесь 👇',
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text='💳 Выбрать тариф',            callback_data='buy')],
-                [InlineKeyboardButton(text='👥 Получить дни (рефералы)',  callback_data='referral')],
-                [InlineKeyboardButton(text='🏠 Главное меню',             callback_data='menu')],
-            ])
-        )
-        return None
-    return data
 
 
 def kb_back() -> InlineKeyboardMarkup:
@@ -180,16 +261,10 @@ def kb_back() -> InlineKeyboardMarkup:
     ])
 
 
-def kb_buy() -> InlineKeyboardMarkup:
-    rows = []
-    for key in ['Miner', 'Sender', 'Start', 'Pro', 'Scale']:
-        icon  = PLAN_ICONS[key]
-        price = PLAN_PRICE[key]
-        desc  = PLAN_DESC[key]
-        label = f'{icon} {key}  ·  {price} ₽/мес'
-        rows.append([InlineKeyboardButton(text=label, url=f'{SITE_URL}/buy/{key.lower()}')])
-    rows.append([InlineKeyboardButton(text='🏠 Главное меню', callback_data='menu')])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+def kb_section(*rows) -> InlineKeyboardMarkup:
+    kb = [list(r) for r in rows]
+    kb.append([InlineKeyboardButton(text='🏠 Главное меню', callback_data='menu')])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def kb_stars() -> InlineKeyboardMarkup:
@@ -207,32 +282,14 @@ def kb_stars() -> InlineKeyboardMarkup:
     ])
 
 
-# ─────────────────────── Обязательная подписка ───────────────────
-def kb_subscribe() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='📢 Подписаться на канал', url=CHANNEL_URL)],
-        [InlineKeyboardButton(text='✅ Проверить подписку',   callback_data='check_sub')],
-    ])
-
-
-def kb_home() -> InlineKeyboardMarkup:
-    """Лаконичный стартовый экран — одна крупная CTA, функции спрятаны за ней."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='🚀 Начать работу сейчас', callback_data='menu')],
-        [
-            InlineKeyboardButton(text='👤 Профиль',  callback_data='profile'),
-            InlineKeyboardButton(text='💬 Поддержка', url=SUPPORT_URL),
-        ],
-    ])
-
+# ==================== GATES ====================
 
 async def is_subscribed(user_id: int) -> bool:
-    """Проверяет подписку на канал. Если бот не админ / ошибка — пропускает (fail-open)."""
     try:
         member = await bot.get_chat_member(CHANNEL_ID, user_id)
         return member.status in ('member', 'administrator', 'creator')
     except Exception as e:
-        logging.warning(f'Проверка подписки {user_id}: {e} (бот должен быть админом канала)')
+        logging.warning(f'Проверка подписки {user_id}: {e} (fail-open)')
         return True
 
 
@@ -244,192 +301,177 @@ def _sub_gate_text() -> str:
         f'всё в одном боте, без рутины.\n'
         f'⚡ Запусти поток целевого трафика быстро и просто.\n\n'
         f'{DIVIDER}\n\n'
-        f'🔒 <b>Чтобы начать пользоваться ботом — подпишитесь на канал</b>\n\n'
+        f'🔒 <b>Чтобы начать — подпишитесь на канал</b>\n\n'
         f'<i>Там обновления, кейсы и фишки сервиса.</i>'
     )
 
 
-# ─────────────────────────── /start ──────────────────────────────
+async def _require_license(call: CallbackQuery) -> list[dict] | None:
+    """Пропускает только пользователей с активной лицензией."""
+    tg_id    = str(call.from_user.id)
+    licenses = await db_get_licenses(tg_id)
+    active   = [l for l in licenses if not l['is_expired']]
+    if not active:
+        await call.message.edit_text(
+            f'⏳ <b>Нет активной лицензии</b>\n{DIVIDER}\n\n'
+            f'Инструменты доступны на платном тарифе.\n'
+            f'Обратитесь в поддержку для оформления доступа 👇',
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text='💳 Купить доступ', callback_data='buy')],
+                [InlineKeyboardButton(text='💬 Поддержка',     url=SUPPORT_URL)],
+                [InlineKeyboardButton(text='🏠 Главное меню',  callback_data='menu')],
+            ])
+        )
+        return None
+    return active
+
+
+# ==================== /start ====================
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
 
-    # Гейт обязательной подписки
     if not await is_subscribed(message.from_user.id):
         await message.answer(_sub_gate_text(), reply_markup=kb_subscribe(),
                              disable_web_page_preview=True)
         return
 
-    # Deep link для QR-привязки: /start link_XXXXXX
-    args = message.text.split(maxsplit=1)
-    if len(args) > 1 and args[1].startswith('link_'):
-        await _handle_link_code(message, state, args[1][5:])
-        return
+    tg_id = str(message.from_user.id)
+    args  = message.text.split(maxsplit=1)
 
-    await _enter_app(message.from_user, state, answer_msg=message)
+    # Реферальная ссылка: /start ref_<tg_id>
+    ref_by = None
+    if len(args) > 1 and args[1].startswith('ref_'):
+        ref_id = args[1][4:]
+        if ref_id != tg_id:
+            ref_by = ref_id
+
+    is_new = await db_get_user(tg_id) is None
+    await db_ensure_user(tg_id, message.from_user.first_name or '',
+                         message.from_user.username or '', ref_by)
+
+    # Начислить реферальный бонус пригласившему
+    if is_new and ref_by:
+        lics    = await db_get_licenses(ref_by)
+        active  = [l for l in lics if not l['is_expired']]
+        product = active[0]['product'] if active else 'Start'
+        await db_add_days(ref_by, product, 1)
+        try:
+            await bot.send_message(int(ref_by), f'🎉 <b>+1 день</b> к лицензии — к вам присоединился реферал!')
+        except Exception:
+            pass
+
+    await _enter_app(message.from_user, answer_msg=message)
 
 
-async def _enter_app(from_user, state: FSMContext, answer_msg=None, edit_call=None):
-    """Показывает домашний экран после подтверждения подписки."""
-    tg_id = str(from_user.id)
-    data  = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
+async def _enter_app(from_user, answer_msg=None, edit_call=None):
+    tg_id    = str(from_user.id)
+    name     = from_user.first_name or 'друг'
+    licenses = await db_get_licenses(tg_id)
+    active   = [l for l in licenses if not l['is_expired']]
 
-    if data.get('found'):
-        name     = data['user']['name']
-        active   = [l for l in data.get('licenses', []) if not l['is_expired']]
-        if active:
-            soonest   = min(active, key=lambda l: l['days_left'])
-            lic_count = f'🟢 Активна  ·  {len(active)} {"лицензия" if len(active) == 1 else "лицензии" if len(active) < 5 else "лицензий"}'
-            exp_line  = f'📅 До {format_date(soonest["expires_at"])}'
-        else:
-            lic_count = '🔴 Нет активных лицензий'
-            exp_line  = '💡 Перейдите в «Купить / Продлить»'
-        text = (
-            f'{LOGO}\n\n'
-            f'👋 Привет, <b>{name}</b>!\n\n'
-            f'{lic_count}\n'
-            f'{exp_line}\n\n'
-            f'🌐 Прокси · 👤 Аккаунты · 🎯 Аудитория · 📨 Рассылка —\n'
-            f'всё в одном боте, без рутины.\n\n'
-            f'Нажми кнопку ниже, чтобы начать 👇'
-        )
-        if edit_call:
-            await edit_call.message.edit_text(text, reply_markup=kb_home())
-        else:
-            await answer_msg.answer(text, reply_markup=kb_home())
+    if active:
+        soonest  = min(active, key=lambda l: l['days_left'])
+        n        = len(active)
+        word     = 'лицензия' if n == 1 else ('лицензии' if n < 5 else 'лицензий')
+        lic_line = f'🟢 Активна  ·  {n} {word}'
+        exp_line = f'📅 До {format_date(soonest["expires_at"])}'
     else:
-        text = (
-            f'{LOGO}\n\n'
-            f'👋 Добро пожаловать!\n\n'
-            f'Прокси · Аккаунты · Сбор аудитории · Умные рассылки —\n'
-            f'всё в одном боте.\n\n'
-            f'{DIVIDER}\n\n'
-            f'📧 Введите <b>email</b>, с которым вы\n'
-            f'зарегистрированы на сайте:\n\n'
-            f'<i>Нет аккаунта? → <a href="{SITE_URL}/register">Регистрация</a></i>'
-        )
-        if edit_call:
-            await edit_call.message.edit_text(text, disable_web_page_preview=True)
-        else:
-            await answer_msg.answer(text, disable_web_page_preview=True)
-        await state.set_state(States.waiting_email)
+        lic_line = '🔴 Нет активных лицензий'
+        exp_line = '💡 Нажмите «Купить» или обратитесь в поддержку'
+
+    text = (
+        f'{LOGO}\n\n'
+        f'👋 Привет, <b>{name}</b>!\n\n'
+        f'{lic_line}\n'
+        f'{exp_line}\n\n'
+        f'🌐 Прокси · 👤 Аккаунты · 🎯 Аудитория · 📨 Рассылка —\n'
+        f'всё в одном боте, без рутины.\n\n'
+        f'Нажми кнопку ниже, чтобы начать 👇'
+    )
+    if edit_call:
+        await edit_call.message.edit_text(text, reply_markup=kb_home())
+    else:
+        await answer_msg.answer(text, reply_markup=kb_home())
 
 
-# ─────────────────────────── Проверка подписки ───────────────────
+# ==================== ПОДПИСКА ====================
+
 @dp.callback_query(F.data == 'check_sub')
 async def cb_check_sub(call: CallbackQuery, state: FSMContext):
     if await is_subscribed(call.from_user.id):
         await call.answer('Спасибо за подписку! 🎉')
-        await _enter_app(call.from_user, state, edit_call=call)
+        tg_id = str(call.from_user.id)
+        await db_ensure_user(tg_id, call.from_user.first_name or '', call.from_user.username or '')
+        await _enter_app(call.from_user, edit_call=call)
     else:
         await call.answer('Вы ещё не подписались на канал 😔', show_alert=True)
 
 
-async def _handle_link_code(message: Message, state: FSMContext, code: str):
-    """Привязка через QR-код (deep link)."""
-    tg_id  = str(message.from_user.id)
-    result = await api('post', '/api/bot/link_code', json={'code': code, 'tg_id': tg_id})
+# ==================== ГЛАВНОЕ МЕНЮ ====================
 
-    if result.get('ok'):
-        data = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
-        name = data.get('user', {}).get('name', 'пользователь')
-        await message.answer(
-            f'{LOGO}\n\n'
-            f'✅ <b>Аккаунт привязан!</b>\n\n'
-            f'Привет, <b>{name}</b>! Добро пожаловать.\n\n'
-            f'Выберите раздел 👇',
-            reply_markup=kb_main()
-        )
-    else:
-        err = result.get('error', 'Неизвестная ошибка')
-        await message.answer(
-            f'❌ <b>Не удалось привязать по QR-коду</b>\n\n'
-            f'<i>{err}</i>\n\n'
-            f'Введите email вручную:'
-        )
-        await state.set_state(States.waiting_email)
-
-
-# ─────────────────────────── Привязка по email ───────────────────
-@dp.message(States.waiting_email)
-async def process_email(message: Message, state: FSMContext):
-    email = message.text.strip().lower()
-
-    if '@' not in email or '.' not in email:
-        await message.answer(
-            '❌ <b>Некорректный email</b>\n\n'
-            'Введите адрес в формате <code>name@domain.ru</code>:'
-        )
-        return
-
-    tg_id       = str(message.from_user.id)
-    tg_username = message.from_user.username or ''
-
-    result = await api('post', '/api/bot/link', json={
-        'email':       email,
-        'tg_id':       tg_id,
-        'tg_username': tg_username,
-    })
-
-    if result.get('ok'):
-        data = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
-        name = data.get('user', {}).get('name', email.split('@')[0])
-        await state.clear()
-        await message.answer(
-            f'{LOGO}\n\n'
-            f'✅ <b>Аккаунт успешно привязан!</b>\n\n'
-            f'Привет, <b>{name}</b>!\n'
-            f'Теперь управляйте подпиской прямо здесь.\n\n'
-            f'Выберите раздел 👇',
-            reply_markup=kb_main()
-        )
-    else:
-        err = result.get('error', '')
-        if 'не найден' in err:
-            await message.answer(
-                f'❌ <b>Аккаунт не найден</b>\n\n'
-                f'Email <code>{email}</code> не зарегистрирован.\n\n'
-                f'👉 <a href="{SITE_URL}/register">Создать аккаунт</a>\n\n'
-                f'После регистрации введите email снова:'
-            )
-        else:
-            await message.answer(f'⚠️ <b>Ошибка:</b> {err}\n\nПопробуйте ещё раз:')
-
-
-# ─────────────────────────── Главное меню ────────────────────────
 @dp.callback_query(F.data == 'menu')
 async def cb_menu(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    tg_id = str(call.from_user.id)
-    data  = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
+    tg_id    = str(call.from_user.id)
+    name     = call.from_user.first_name or 'друг'
+    licenses = await db_get_licenses(tg_id)
+    active   = [l for l in licenses if not l['is_expired']]
 
-    if data.get('found'):
-        name     = data['user']['name']
-        licenses = data.get('licenses', [])
-        active   = [l for l in licenses if not l['is_expired']]
+    if active:
+        soonest  = min(active, key=lambda l: l['days_left'])
+        lic_line = f'🟢 Активна  ·  {len(active)} лиц.'
+        exp_line = f'📅 До {format_date(soonest["expires_at"])}'
+    else:
+        lic_line = '🔴 Нет активных лицензий'
+        exp_line = '💡 Перейдите в «Купить / Продлить»'
 
-        if active:
-            soonest  = min(active, key=lambda l: l['days_left'])
-            lic_line = f'🟢 Активна  ·  {len(active)} лиц.'
-            exp_line = f'📅 До {format_date(soonest["expires_at"])}'
-        else:
-            lic_line = '🔴 Нет активных лицензий'
-            exp_line = f'💡 Перейдите в «Купить / Продлить»'
+    await call.message.edit_text(
+        f'{LOGO}\n\n'
+        f'👤 <b>{name}</b>\n\n'
+        f'{lic_line}\n'
+        f'{exp_line}\n\n'
+        f'Выберите раздел 👇',
+        reply_markup=kb_main()
+    )
 
-        text = (
-            f'{LOGO}\n\n'
-            f'👤 <b>{name}</b>\n\n'
-            f'{lic_line}\n'
-            f'{exp_line}\n\n'
-            f'Выберите раздел 👇'
+
+# ==================== ПРОФИЛЬ ====================
+
+@dp.callback_query(F.data == 'profile')
+async def cb_profile(call: CallbackQuery):
+    tg_id    = str(call.from_user.id)
+    user     = await db_get_user(tg_id)
+    licenses = await db_get_licenses(tg_id)
+    active   = [l for l in licenses if not l['is_expired']]
+
+    name     = call.from_user.first_name or '—'
+    username = f'@{call.from_user.username}' if call.from_user.username else '—'
+    joined   = format_date(user['joined_at'][:10]) if user else '—'
+
+    if active:
+        lic_text = '\n'.join(
+            f'   {PLAN_ICONS.get(l["product"], "📦")} <b>{l["product"]}</b>'
+            f' — до {format_date(l["expires_at"])}'
+            for l in active
         )
     else:
-        text = f'{LOGO}\n\nВыберите раздел 👇'
+        lic_text = '   🔴 Нет активных лицензий'
 
-    await call.message.edit_text(text, reply_markup=kb_main())
+    await call.message.edit_text(
+        f'👤 <b>Профиль</b>\n{DIVIDER}\n\n'
+        f'<b>Имя:</b> {name}\n'
+        f'<b>Username:</b> {username}\n'
+        f'<b>Telegram ID:</b> <code>{tg_id}</code>\n'
+        f'<b>В боте с:</b> {joined}\n\n'
+        f'🛡 <b>Лицензии:</b>\n{lic_text}',
+        reply_markup=kb_back()
+    )
 
 
-# ─────────────────────────── Как начать (онбординг) ──────────────
+# ==================== ОНБОРДИНГ ====================
+
 @dp.callback_query(F.data == 'howto')
 async def cb_howto(call: CallbackQuery):
     await call.message.edit_text(
@@ -457,10 +499,11 @@ async def cb_howto(call: CallbackQuery):
     )
 
 
-# ─────────────────────────── Прокси ──────────────────────────────
+# ==================== РАЗДЕЛЫ ПРОДУКТА ====================
+
 @dp.callback_query(F.data == 'proxies')
 async def cb_proxies(call: CallbackQuery):
-    if not await _require_account(call):
+    if not await _require_license(call):
         return
     await call.message.edit_text(
         f'🌐 <b>Прокси</b>\n{DIVIDER}\n\n'
@@ -470,18 +513,16 @@ async def cb_proxies(call: CallbackQuery):
         f'<code>host:port:login:password</code>\n\n'
         f'📖 <b>Инструкция:</b> добавьте прокси списком, проверьте на валидность и '
         f'распределите по аккаунтам — последовательно или случайно.\n\n'
-        f'<i>Интерактивное управление прямо в боте подключается.</i>',
+        f'<i>🔧 Полное управление прокси через бота — скоро.</i>',
         reply_markup=kb_section(
-            [InlineKeyboardButton(text='🛒 Купить прокси',        url=f'{SITE_URL}/buy_proxy')],
-            [InlineKeyboardButton(text='🌐 Открыть в кабинете',   url=f'{SITE_URL}/dashboard')],
+            [InlineKeyboardButton(text='💬 Поддержка', url=SUPPORT_URL)],
         )
     )
 
 
-# ─────────────────────────── Аккаунты ────────────────────────────
 @dp.callback_query(F.data == 'accounts')
 async def cb_accounts(call: CallbackQuery):
-    if not await _require_account(call):
+    if not await _require_license(call):
         return
     await call.message.edit_text(
         f'👤 <b>Аккаунты</b>\n{DIVIDER}\n\n'
@@ -491,17 +532,16 @@ async def cb_accounts(call: CallbackQuery):
         f'• импорт .session / TData\n\n'
         f'📖 <b>Инструкция:</b> привяжите прокси к аккаунту, проверьте статус '
         f'(жив / ограничен / требует входа), настройте профиль и прогрев.\n\n'
-        f'<i>Подключение аккаунтов прямо в боте подключается.</i>',
+        f'<i>🔧 Подключение аккаунтов через бота — скоро.</i>',
         reply_markup=kb_section(
-            [InlineKeyboardButton(text='🌐 Открыть в кабинете', url=f'{SITE_URL}/dashboard')],
+            [InlineKeyboardButton(text='💬 Поддержка', url=SUPPORT_URL)],
         )
     )
 
 
-# ─────────────────────────── Аудитория ───────────────────────────
 @dp.callback_query(F.data == 'audience')
 async def cb_audience(call: CallbackQuery):
-    if not await _require_account(call):
+    if not await _require_license(call):
         return
     await call.message.edit_text(
         f'🎯 <b>Аудитория</b>\n{DIVIDER}\n\n'
@@ -510,19 +550,17 @@ async def cb_audience(call: CallbackQuery):
         f'<b>Фильтры:</b> онлайн-статус, язык, активность.\n\n'
         f'📖 <b>Инструкция:</b> укажите чаты/каналы → запустите сбор → получите готовую '
         f'базу для рассылки.\n\n'
-        f'⚖️ Сбор — только из <b>открытых</b> источников. Ответственность за дальнейшую '
-        f'обработку данных — на вас.\n\n'
-        f'<i>Запуск сбора прямо в боте подключается.</i>',
+        f'⚖️ Сбор — только из <b>открытых</b> источников.\n\n'
+        f'<i>🔧 Запуск сбора через бота — скоро.</i>',
         reply_markup=kb_section(
-            [InlineKeyboardButton(text='🌐 Открыть в кабинете', url=f'{SITE_URL}/dashboard')],
+            [InlineKeyboardButton(text='💬 Поддержка', url=SUPPORT_URL)],
         )
     )
 
 
-# ─────────────────────────── Рассылка ────────────────────────────
 @dp.callback_query(F.data == 'sending')
 async def cb_sending(call: CallbackQuery):
-    if not await _require_account(call):
+    if not await _require_license(call):
         return
     await call.message.edit_text(
         f'📨 <b>Рассылка</b>\n{DIVIDER}\n\n'
@@ -534,76 +572,63 @@ async def cb_sending(call: CallbackQuery):
         f'• статистика доставки и логи\n\n'
         f'📖 <b>Инструкция:</b> выберите аккаунт → базу → текст → лимиты → запуск.\n\n'
         f'⚖️ Рассылки — только тем, кто дал согласие (38-ФЗ). Спам запрещён.\n\n'
-        f'<i>Запуск рассылок прямо в боте подключается.</i>',
+        f'<i>🔧 Запуск рассылок через бота — скоро.</i>',
         reply_markup=kb_section(
-            [InlineKeyboardButton(text='🌐 Открыть в кабинете', url=f'{SITE_URL}/dashboard')],
+            [InlineKeyboardButton(text='💬 Поддержка', url=SUPPORT_URL)],
         )
     )
 
 
-# ─────────────────────────── Мои лицензии ────────────────────────
+# ==================== ЛИЦЕНЗИИ ====================
+
 @dp.callback_query(F.data == 'licenses')
 async def cb_licenses(call: CallbackQuery):
-    tg_id = str(call.from_user.id)
-    data  = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
-
-    if not data.get('found'):
-        await call.answer('Сначала привяжите аккаунт через /start', show_alert=True)
-        return
-
-    licenses = data.get('licenses', [])
+    tg_id    = str(call.from_user.id)
+    licenses = await db_get_licenses(tg_id)
 
     if not licenses:
-        text = (
-            f'🛡 <b>Мои лицензии</b>\n'
-            f'{DIVIDER}\n\n'
+        await call.message.edit_text(
+            f'🛡 <b>Мои лицензии</b>\n{DIVIDER}\n\n'
             f'🔴 Активных лицензий нет\n\n'
-            f'Приобретите подписку, чтобы начать работу.'
+            f'Приобретите подписку, чтобы начать работу.',
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text='💳 Выбрать тариф', callback_data='buy')],
+                [InlineKeyboardButton(text='🏠 Главное меню',  callback_data='menu')],
+            ])
         )
-        buttons = [
-            [InlineKeyboardButton(text='💳 Выбрать тариф', callback_data='buy')],
-            [InlineKeyboardButton(text='🏠 Главное меню',  callback_data='menu')],
-        ]
-    else:
-        lines = [f'🛡 <b>Мои лицензии</b>\n{DIVIDER}']
-        for lic in licenses:
-            icon   = PLAN_ICONS.get(lic['product'], '📦')
-            days   = lic['days_left']
-            badge  = status_badge(days)
-            date   = format_date(lic['expires_at'])
-            lines.append(
-                f'\n{icon} <b>{lic["product"].upper()}</b>\n'
-                f'   {badge}\n'
-                f'   📅 До {date}'
-            )
-        text = '\n'.join(lines)
-        buttons = [
-            [InlineKeyboardButton(text='💳 Продлить',     callback_data='buy')],
-            [InlineKeyboardButton(text='🏠 Главное меню', callback_data='menu')],
-        ]
+        return
+
+    lines = [f'🛡 <b>Мои лицензии</b>\n{DIVIDER}']
+    for lic in licenses:
+        icon  = PLAN_ICONS.get(lic['product'], '📦')
+        badge = status_badge(lic['days_left'])
+        date  = format_date(lic['expires_at'])
+        lines.append(
+            f'\n{icon} <b>{lic["product"].upper()}</b>\n'
+            f'   {badge}\n'
+            f'   📅 До {date}'
+        )
 
     await call.message.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        '\n'.join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='💳 Продлить',     callback_data='buy')],
+            [InlineKeyboardButton(text='🏠 Главное меню', callback_data='menu')],
+        ])
     )
 
 
-# ─────────────────────────── Получить ключ ───────────────────────
+# ==================== КЛЮЧ ====================
+
 @dp.callback_query(F.data == 'get_key')
 async def cb_get_key(call: CallbackQuery):
-    tg_id = str(call.from_user.id)
-    data  = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
-
-    if not data.get('found'):
-        await call.answer('Сначала привяжите аккаунт через /start', show_alert=True)
-        return
-
-    active = [l for l in data.get('licenses', []) if not l['is_expired']]
+    tg_id    = str(call.from_user.id)
+    licenses = await db_get_licenses(tg_id)
+    active   = [l for l in licenses if not l['is_expired']]
 
     if not active:
         await call.message.edit_text(
-            f'🔑 <b>Ключ активации</b>\n'
-            f'{DIVIDER}\n\n'
+            f'🔑 <b>Ключ активации</b>\n{DIVIDER}\n\n'
             f'🔴 Нет активных лицензий\n\n'
             f'Приобретите подписку, чтобы получить ключ.',
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -613,15 +638,10 @@ async def cb_get_key(call: CallbackQuery):
         )
         return
 
-    lines = [
-        f'🔑 <b>Ключи активации</b>\n'
-        f'{DIVIDER}\n'
-        f'<i>Нажмите на ключ, чтобы скопировать</i>'
-    ]
+    lines = [f'🔑 <b>Ключи активации</b>\n{DIVIDER}\n<i>Нажмите на ключ, чтобы скопировать</i>']
     for lic in active:
         icon  = PLAN_ICONS.get(lic['product'], '📦')
-        days  = lic['days_left']
-        badge = status_badge(days)
+        badge = status_badge(lic['days_left'])
         lines.append(
             f'\n{icon} <b>{lic["product"]}</b>  ·  {badge}\n'
             f'<code>{lic["license_key"]}</code>'
@@ -630,69 +650,59 @@ async def cb_get_key(call: CallbackQuery):
     await call.message.edit_text('\n'.join(lines), reply_markup=kb_back())
 
 
-# ─────────────────────────── Купить / продлить ───────────────────
+# ==================== КУПИТЬ ====================
+
 @dp.callback_query(F.data == 'buy')
 async def cb_buy(call: CallbackQuery):
-    lines = [
-        f'💳 <b>Тарифы</b>\n{DIVIDER}\n'
-    ]
+    lines = [f'💳 <b>Тарифы</b>\n{DIVIDER}\n']
     for key in ['Miner', 'Sender', 'Start', 'Pro', 'Scale']:
         icon  = PLAN_ICONS[key]
         price = PLAN_PRICE[key]
         desc  = PLAN_DESC[key]
         lines.append(f'{icon} <b>{key}</b> — {desc}\n    └ {price} ₽ / месяц')
-
-    lines.append(f'\n{DIVIDER}')
-    lines.append('⬇️ Нажмите на тариф для оплаты\n💡 Лицензия активируется автоматически')
-
-    await call.message.edit_text('\n'.join(lines), reply_markup=kb_buy())
-
-
-# ─────────────────────────── Рефералы ────────────────────────────
-@dp.callback_query(F.data == 'referral')
-async def cb_referral(call: CallbackQuery):
-    tg_id = str(call.from_user.id)
-    data  = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
-
-    if not data.get('found'):
-        await call.answer('Сначала привяжите аккаунт через /start', show_alert=True)
-        return
-
-    ref_link = data.get('ref_link', '')
-    count    = data.get('referral_count', 0)
-
-    promo = (
-        f'Попробуй TG Lead Wareon — лучший инструмент для '
-        f'парсинга и рассылок в Telegram. Первые 3 дня бесплатно 👉 {ref_link}'
+    lines += [
+        f'\n{DIVIDER}',
+        '💬 Напишите менеджеру — оформим доступ и пришлём ключ прямо в бот.',
+    ]
+    await call.message.edit_text(
+        '\n'.join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='💬 Написать менеджеру', url=SUPPORT_URL)],
+            [InlineKeyboardButton(text='🏠 Главное меню',        callback_data='menu')],
+        ])
     )
 
+
+# ==================== РЕФЕРАЛЫ ====================
+
+@dp.callback_query(F.data == 'referral')
+async def cb_referral(call: CallbackQuery):
+    tg_id    = str(call.from_user.id)
+    count    = await db_referral_count(tg_id)
+    bot_info = await bot.get_me()
+    ref_link = f'https://t.me/{bot_info.username}?start=ref_{tg_id}'
+    promo    = (
+        f'Попробуй TG Lead Wareon — лучший инструмент для '
+        f'парсинга и рассылок в Telegram. 👉 {ref_link}'
+    )
     await call.message.edit_text(
-        f'👥 <b>Реферальная программа</b>\n'
-        f'{DIVIDER}\n\n'
+        f'👥 <b>Реферальная программа</b>\n{DIVIDER}\n\n'
         f'🎯 За каждого приглашённого — <b>+1 день</b> к лицензии\n\n'
         f'📊 Приглашено: <b>{count} чел.</b>\n'
         f'🎁 Заработано: <b>+{count} дней</b>\n\n'
         f'{DIVIDER}\n\n'
-        f'🔗 <b>Ваша ссылка:</b>\n'
-        f'<code>{ref_link}</code>\n\n'
-        f'📢 <b>Готовый текст:</b>\n'
-        f'<i>{promo}</i>',
+        f'🔗 <b>Ваша ссылка:</b>\n<code>{ref_link}</code>\n\n'
+        f'📢 <b>Готовый текст:</b>\n<i>{promo}</i>',
         reply_markup=kb_back()
     )
 
 
-# ─────────────────────────── Отзыв ───────────────────────────────
+# ==================== ОТЗЫВ ====================
+
 @dp.callback_query(F.data == 'review')
 async def cb_review(call: CallbackQuery, state: FSMContext):
-    tg_id = str(call.from_user.id)
-    data  = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
-    if not data.get('found'):
-        await call.answer('Сначала привяжите аккаунт через /start', show_alert=True)
-        return
-
     await call.message.edit_text(
-        f'⭐️ <b>Оставить отзыв</b>\n'
-        f'{DIVIDER}\n\n'
+        f'⭐️ <b>Оставить отзыв</b>\n{DIVIDER}\n\n'
         f'🎁 За отзыв вы получите <b>+2 дня</b> к лицензии!\n\n'
         f'Напишите несколько предложений о сервисе:\n'
         f'<i>что понравилось, что помогло, результаты...</i>',
@@ -707,55 +717,58 @@ async def cb_review(call: CallbackQuery, state: FSMContext):
 async def process_review_text(message: Message, state: FSMContext):
     text = message.text.strip()
     if len(text) < 20:
-        await message.answer(
-            '❌ <b>Отзыв слишком короткий</b>\n\n'
-            'Напишите хотя бы пару предложений:'
-        )
+        await message.answer('❌ <b>Отзыв слишком короткий</b>\n\nНапишите хотя бы пару предложений:')
         return
-
     await state.update_data(review_text=text)
-    await message.answer(
-        '👍 <b>Отлично!</b>\n\n'
-        'Теперь поставьте оценку сервису:',
-        reply_markup=kb_stars()
-    )
+    await message.answer('👍 <b>Отлично!</b>\n\nТеперь поставьте оценку сервису:', reply_markup=kb_stars())
     await state.set_state(States.review_rating)
 
 
 @dp.callback_query(States.review_rating, F.data.startswith('star_'))
 async def process_review_rating(call: CallbackQuery, state: FSMContext):
-    rating    = int(call.data.split('_')[1])
-    fsm_data  = await state.get_data()
-    text      = fsm_data.get('review_text', '')
-    tg_id     = str(call.from_user.id)
-    user_data = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
-    email     = user_data.get('user', {}).get('email', '')
+    rating   = int(call.data.split('_')[1])
+    fsm_data = await state.get_data()
+    text     = fsm_data.get('review_text', '')
+    tg_id    = str(call.from_user.id)
 
-    result = await api('post', '/api/review_bonus', json={
-        'token':       REVIEW_BOT_TOKEN,
-        'telegram_id': tg_id,
-        'username':    call.from_user.username or '',
-        'rating':      rating,
-        'text':        text,
-        'user_email':  email,
-    })
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            'INSERT INTO reviews (tg_id, username, rating, body) VALUES (?,?,?,?)',
+            (tg_id, call.from_user.username or '', rating, text)
+        )
+        await db.commit()
+
+    # Добавить +2 дня к первой активной лицензии (или создать Start)
+    lics    = await db_get_licenses(tg_id)
+    active  = [l for l in lics if not l['is_expired']]
+    product = active[0]['product'] if active else 'Start'
+    await db_add_days(tg_id, product, 2)
+
+    stars = '★' * rating + '☆' * (5 - rating)
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            f'⭐️ <b>Новый отзыв</b>\n'
+            f'от @{call.from_user.username or tg_id} (ID: {tg_id})\n'
+            f'Оценка: {stars}\n\n'
+            f'<i>{text}</i>'
+        )
+    except Exception:
+        pass
 
     await state.clear()
-    stars = '★' * rating + '☆' * (5 - rating)
-    bonus = result.get('bonus_days', 2)
-
     await call.message.edit_text(
-        f'✅ <b>Отзыв отправлен! Спасибо!</b>\n'
-        f'{DIVIDER}\n\n'
+        f'✅ <b>Отзыв отправлен! Спасибо!</b>\n{DIVIDER}\n\n'
         f'<b>{stars}</b>\n\n'
         f'<i>«{text}»</i>\n\n'
         f'{DIVIDER}\n\n'
-        f'🎁 <b>+{bonus} дня</b> добавлено к вашей лицензии!',
+        f'🎁 <b>+2 дня</b> добавлено к вашей лицензии!',
         reply_markup=kb_back()
     )
 
 
-# ─────────────────────────── /help, /key, /ref ───────────────────
+# ==================== ТЕКСТОВЫЕ КОМАНДЫ ====================
+
 @dp.message(Command('help'))
 async def cmd_help(message: Message):
     await message.answer(
@@ -766,31 +779,18 @@ async def cmd_help(message: Message):
         f'▸ /ref — реферальная ссылка\n'
         f'▸ /help — эта справка\n\n'
         f'{DIVIDER}\n\n'
-        f'🌐 <a href="{SITE_URL}">tgleadwareon.ru</a>\n'
         f'💬 <a href="{SUPPORT_URL}">Поддержка</a>'
     )
 
 
 @dp.message(Command('key'))
 async def cmd_key(message: Message):
-    tg_id = str(message.from_user.id)
-    data  = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
-
-    if not data.get('found'):
-        await message.answer(
-            '❌ <b>Аккаунт не привязан</b>\n\n'
-            'Введите /start и следуйте инструкции.'
-        )
-        return
-
-    active = [l for l in data.get('licenses', []) if not l['is_expired']]
+    tg_id    = str(message.from_user.id)
+    licenses = await db_get_licenses(tg_id)
+    active   = [l for l in licenses if not l['is_expired']]
     if not active:
-        await message.answer(
-            '🔴 <b>Нет активных лицензий</b>\n\n'
-            'Перейдите в /start и купите подписку.'
-        )
+        await message.answer('🔴 <b>Нет активных лицензий</b>\n\nНапишите в поддержку для покупки доступа.')
         return
-
     lines = [f'🔑 <b>Ваши ключи</b>\n{DIVIDER}']
     for lic in active:
         icon = PLAN_ICONS.get(lic['product'], '📦')
@@ -800,18 +800,10 @@ async def cmd_key(message: Message):
 
 @dp.message(Command('ref'))
 async def cmd_ref(message: Message):
-    tg_id = str(message.from_user.id)
-    data  = await api('get', '/api/bot/user_info', params={'tg_id': tg_id})
-
-    if not data.get('found'):
-        await message.answer(
-            '❌ <b>Аккаунт не привязан</b>\n\n'
-            'Введите /start и следуйте инструкции.'
-        )
-        return
-
-    ref_link = data.get('ref_link', '')
-    count    = data.get('referral_count', 0)
+    tg_id    = str(message.from_user.id)
+    count    = await db_referral_count(tg_id)
+    bot_info = await bot.get_me()
+    ref_link = f'https://t.me/{bot_info.username}?start=ref_{tg_id}'
     await message.answer(
         f'👥 <b>Рефералы</b>\n{DIVIDER}\n\n'
         f'📊 Приглашено: <b>{count} чел.</b>  ·  Бонус: <b>+{count} дн.</b>\n\n'
@@ -819,60 +811,216 @@ async def cmd_ref(message: Message):
     )
 
 
-# ─────────────────────── Scheduler: уведомления ──────────────────
+# ==================== АДМИН-КОМАНДЫ ====================
+# Доступны только ADMIN_ID
+
+@dp.message(Command('addlicense'))
+async def cmd_addlicense(message: Message):
+    """Выдать лицензию: /addlicense <tg_id> <product> <days>"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    parts = message.text.split()
+    if len(parts) != 4:
+        await message.answer(
+            'Использование: <code>/addlicense &lt;tg_id&gt; &lt;product&gt; &lt;days&gt;</code>\n'
+            f'Продукты: {", ".join(PLAN_ICONS)}'
+        )
+        return
+    _, tg_id, product, days_str = parts
+    if product not in PLAN_ICONS:
+        await message.answer(f'Неверный продукт. Доступные: {", ".join(PLAN_ICONS)}')
+        return
+    try:
+        days = int(days_str)
+        assert days > 0
+    except (ValueError, AssertionError):
+        await message.answer('Дней должно быть положительным числом')
+        return
+
+    await db_ensure_user(tg_id, '', '')
+    key     = await db_add_license(tg_id, product, days)
+    expires = (datetime.utcnow() + timedelta(days=days)).date().isoformat()
+
+    await message.answer(
+        f'✅ <b>Лицензия выдана</b>\n\n'
+        f'ID: <code>{tg_id}</code>\n'
+        f'Продукт: {PLAN_ICONS.get(product)} {product}\n'
+        f'Дней: {days}  ·  До {format_date(expires)}\n'
+        f'Ключ: <code>{key}</code>'
+    )
+    try:
+        await bot.send_message(
+            int(tg_id),
+            f'{LOGO}\n\n'
+            f'🎉 <b>Лицензия активирована!</b>\n\n'
+            f'{PLAN_ICONS.get(product)} <b>{product}</b>\n'
+            f'📅 Действует до {format_date(expires)}\n\n'
+            f'🔑 Ключ: <code>{key}</code>\n\n'
+            f'Нажмите /start чтобы начать работу!'
+        )
+    except Exception as e:
+        await message.answer(f'⚠️ Не удалось уведомить пользователя: {e}')
+
+
+@dp.message(Command('adddays'))
+async def cmd_adddays(message: Message):
+    """Продлить лицензию: /adddays <tg_id> <product> <days>"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    parts = message.text.split()
+    if len(parts) != 4:
+        await message.answer('Использование: <code>/adddays &lt;tg_id&gt; &lt;product&gt; &lt;days&gt;</code>')
+        return
+    _, tg_id, product, days_str = parts
+    try:
+        days = int(days_str)
+    except ValueError:
+        await message.answer('Дней должно быть числом')
+        return
+
+    await db_add_days(tg_id, product, days)
+    await message.answer(f'✅ Добавлено {days} дней к {product} для <code>{tg_id}</code>')
+    try:
+        await bot.send_message(int(tg_id), f'🎁 <b>+{days} дней</b> к лицензии <b>{product}</b>!')
+    except Exception:
+        pass
+
+
+@dp.message(Command('rmlicense'))
+async def cmd_rmlicense(message: Message):
+    """Удалить лицензии: /rmlicense <tg_id> [product]"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    parts   = message.text.split()
+    tg_id   = parts[1] if len(parts) > 1 else None
+    product = parts[2] if len(parts) > 2 else None
+    if not tg_id:
+        await message.answer('Использование: <code>/rmlicense &lt;tg_id&gt; [product]</code>')
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        if product:
+            await db.execute('DELETE FROM licenses WHERE tg_id=? AND product=?', (tg_id, product))
+        else:
+            await db.execute('DELETE FROM licenses WHERE tg_id=?', (tg_id,))
+        await db.commit()
+    suffix = f' ({product})' if product else ' (все продукты)'
+    await message.answer(f'✅ Лицензии удалены для <code>{tg_id}</code>{suffix}')
+
+
+@dp.message(Command('userinfo'))
+async def cmd_userinfo(message: Message):
+    """Инфо о пользователе: /userinfo <tg_id>"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer('Использование: <code>/userinfo &lt;tg_id&gt;</code>')
+        return
+    tg_id = parts[1]
+    user  = await db_get_user(tg_id)
+    lics  = await db_get_licenses(tg_id)
+
+    if not user:
+        await message.answer(f'Пользователь <code>{tg_id}</code> не найден в базе')
+        return
+
+    lines = [
+        f'👤 <b>Пользователь {tg_id}</b>\n{DIVIDER}',
+        f'Имя: {user["first_name"] or "—"}',
+        f'Username: @{user["username"]}' if user['username'] else 'Username: —',
+        f'Реферал от: {user["referred_by"] or "—"}',
+        f'В боте с: {user["joined_at"][:10]}',
+        '',
+        '<b>Лицензии:</b>',
+    ]
+    if lics:
+        for l in lics:
+            badge = status_badge(l['days_left'])
+            lines.append(
+                f'  {PLAN_ICONS.get(l["product"], "📦")} {l["product"]} '
+                f'— {badge} — до {l["expires_at"][:10]}\n'
+                f'  Ключ: <code>{l["license_key"]}</code>'
+            )
+    else:
+        lines.append('  Нет лицензий')
+
+    await message.answer('\n'.join(lines))
+
+
+@dp.message(Command('stats'))
+async def cmd_stats(message: Message):
+    """Общая статистика: /stats"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT COUNT(*) FROM users') as cur:
+            total_users = (await cur.fetchone())[0]
+        async with db.execute(
+            'SELECT COUNT(DISTINCT tg_id) FROM licenses WHERE date(expires_at) >= date("now")'
+        ) as cur:
+            active_users = (await cur.fetchone())[0]
+        async with db.execute('SELECT COUNT(*) FROM licenses') as cur:
+            total_lics = (await cur.fetchone())[0]
+        async with db.execute('SELECT COUNT(*) FROM reviews') as cur:
+            total_reviews = (await cur.fetchone())[0]
+    await message.answer(
+        f'📊 <b>Статистика бота</b>\n{DIVIDER}\n\n'
+        f'👤 Пользователей: <b>{total_users}</b>\n'
+        f'🟢 С активной лицензией: <b>{active_users}</b>\n'
+        f'🛡 Лицензий всего: <b>{total_lics}</b>\n'
+        f'⭐️ Отзывов: <b>{total_reviews}</b>'
+    )
+
+
+# ==================== ПЛАНИРОВЩИК ====================
+
 async def _notify_expiring():
-    """Каждые 12 часов проверяет истекающие лицензии и уведомляет пользователей."""
     await asyncio.sleep(60)
     while True:
-        for days in [3, 1]:
+        for days_ahead in [3, 1]:
             try:
-                result = await api('get', '/api/bot/expiring_licenses', params={'days': days})
-                for u in result.get('users', []):
-                    tg_id = u.get('telegram_id')
+                users = await db_expiring_today(days_ahead)
+                for u in users:
+                    tg_id = u.get('tg_id')
                     if not tg_id:
                         continue
+                    icon = PLAN_ICONS.get(u.get('product', ''), '📦')
+                    date = format_date(u.get('expires_at', ''))
+                    if days_ahead == 3:
+                        text = (
+                            f'⚠️ <b>Лицензия истекает через 3 дня</b>\n{DIVIDER}\n\n'
+                            f'{icon} <b>{u["product"]}</b>\n'
+                            f'📅 Дата окончания: {date}\n\n'
+                            f'Продлите сейчас, чтобы не прерывать работу 👇'
+                        )
+                    else:
+                        text = (
+                            f'🔴 <b>Лицензия истекает СЕГОДНЯ!</b>\n{DIVIDER}\n\n'
+                            f'{icon} <b>{u["product"]}</b>\n\n'
+                            f'Продлите прямо сейчас 👇'
+                        )
                     try:
-                        icon = PLAN_ICONS.get(u.get('product', ''), '📦')
-                        date = format_date(u.get('expires_at', ''))
-
-                        if days == 3:
-                            text = (
-                                f'⚠️ <b>Лицензия истекает через 3 дня</b>\n'
-                                f'{DIVIDER}\n\n'
-                                f'{icon} <b>{u["product"]}</b>\n'
-                                f'📅 Дата окончания: {date}\n\n'
-                                f'Продлите сейчас, чтобы не прерывать работу 👇'
-                            )
-                        else:
-                            text = (
-                                f'🔴 <b>Лицензия истекает СЕГОДНЯ!</b>\n'
-                                f'{DIVIDER}\n\n'
-                                f'{icon} <b>{u["product"]}</b>\n\n'
-                                f'Продлите прямо сейчас 👇'
-                            )
-
                         await bot.send_message(
-                            tg_id,
-                            text,
+                            int(tg_id), text,
                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                 [InlineKeyboardButton(text='💳 Продлить сейчас', callback_data='buy')]
                             ])
                         )
-                        logging.info(f'Уведомление: tg={tg_id} product={u["product"]} days={days}')
+                        logging.info(f'Уведомление: tg={tg_id} product={u["product"]} days={days_ahead}')
                     except Exception as e:
-                        logging.warning(f'Не удалось отправить уведомление {tg_id}: {e}')
+                        logging.warning(f'Не удалось уведомить {tg_id}: {e}')
             except Exception as e:
-                logging.error(f'Scheduler error (days={days}): {e}')
-
+                logging.error(f'Scheduler error (days={days_ahead}): {e}')
         await asyncio.sleep(12 * 3600)
 
 
-# ─────────────────────────── Запуск ──────────────────────────────
+# ==================== ЗАПУСК ====================
+
 async def main():
     if not BOT_TOKEN:
         raise ValueError('BOT_TOKEN не задан')
-
-    logging.info('🤖 TG Lead Wareon Bot запускается...')
+    await db_init()
+    logging.info('🤖 TG Lead Wareon Bot запускается (standalone, без сайта)...')
     asyncio.create_task(_notify_expiring())
     await dp.start_polling(bot, allowed_updates=['message', 'callback_query'])
 
