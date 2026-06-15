@@ -272,9 +272,14 @@ def kb_subscribe() -> InlineKeyboardMarkup:
 
 def kb_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='🚀 Начать работу сейчас', callback_data='menu')],
+        [InlineKeyboardButton(text='🚀 Начать работу', callback_data='menu')],
+        [InlineKeyboardButton(text='📚 Как начать (4 шага)', callback_data='howto')],
         [
             InlineKeyboardButton(text='👤 Профиль',   callback_data='profile'),
+            InlineKeyboardButton(text='👥 Рефералка', callback_data='referral'),
+        ],
+        [
+            InlineKeyboardButton(text='⭐️ Отзывы',    callback_data='review'),
             InlineKeyboardButton(text='💬 Поддержка', url=SUPPORT_URL),
         ],
     ])
@@ -421,28 +426,44 @@ async def _enter_app(from_user, answer_msg=None, edit_call=None):
     active   = [l for l in licenses if not l['is_expired']]
 
     if active:
-        soonest  = min(active, key=lambda l: l['days_left'])
-        n        = len(active)
-        word     = 'лицензия' if n == 1 else ('лицензии' if n < 5 else 'лицензий')
-        lic_line = f'🟢 Активна  ·  {n} {word}'
-        exp_line = f'📅 До {format_date(soonest["expires_at"])}'
+        soonest   = min(active, key=lambda l: l['days_left'])
+        plans     = ' · '.join(sorted({l['product'] for l in active}))
+        status_ln = (
+            f'💎 <b>Доступ открыт</b> · {plans}\n'
+            f'📅 Активен до {format_date(soonest["expires_at"])}'
+        )
     else:
-        lic_line = '🔴 Нет активных лицензий'
-        exp_line = '💡 Нажмите «Купить» или обратитесь в поддержку'
+        status_ln = (
+            f'🆓 <b>Бесплатный режим</b>\n'
+            f'🔓 Оформите доступ, чтобы запустить инструменты'
+        )
 
     text = (
         f'{LOGO}\n\n'
-        f'👋 Привет, <b>{name}</b>!\n\n'
-        f'{lic_line}\n'
-        f'{exp_line}\n\n'
-        f'🌐 Прокси · 👤 Аккаунты · 🎯 Аудитория · 📨 Рассылка —\n'
-        f'всё в одном боте, без рутины.\n\n'
-        f'Нажми кнопку ниже, чтобы начать 👇'
+        f'👋 <b>{name}</b>, добро пожаловать!\n\n'
+        f'Это твой центр привлечения клиентов в Telegram — '
+        f'<b>сбор целевой аудитории и умные рассылки</b> прямо в боте, '
+        f'без программ на компьютере.\n\n'
+        f'{DIVIDER}\n'
+        f'✨ <b>Что умеет бот</b>\n\n'
+        f'🌐 <b>Прокси</b> — стабильная и безопасная работа аккаунтов\n'
+        f'👤 <b>Аккаунты</b> — подключение по номеру или импортом сессии\n'
+        f'🎯 <b>Аудитория</b> — сбор базы из открытых чатов и каналов\n'
+        f'📨 <b>Рассылка</b> — массовые сообщения с AI-текстами и имитацией человека\n\n'
+        f'{DIVIDER}\n'
+        f'💡 <b>Как это работает</b>\n'
+        f'1️⃣ Подключи аккаунт  →  2️⃣ Собери базу  →  '
+        f'3️⃣ Запусти рассылку  →  4️⃣ Получай заявки\n\n'
+        f'{DIVIDER}\n'
+        f'{status_ln}\n\n'
+        f'👇 Жми <b>«Начать работу»</b> — и поехали'
     )
     if edit_call:
-        await edit_call.message.edit_text(text, reply_markup=kb_home())
+        await edit_call.message.edit_text(text, reply_markup=kb_home(),
+                                          disable_web_page_preview=True)
     else:
-        await answer_msg.answer(text, reply_markup=kb_home())
+        await answer_msg.answer(text, reply_markup=kb_home(),
+                                disable_web_page_preview=True)
 
 
 # ==================== ПОДПИСКА ====================
@@ -470,18 +491,25 @@ async def cb_menu(call: CallbackQuery, state: FSMContext):
 
     if active:
         soonest  = min(active, key=lambda l: l['days_left'])
-        lic_line = f'🟢 Активна  ·  {len(active)} лиц.'
+        lic_line = f'🟢 Доступ активен  ·  {len(active)} лиц.'
         exp_line = f'📅 До {format_date(soonest["expires_at"])}'
     else:
-        lic_line = '🔴 Нет активных лицензий'
-        exp_line = '💡 Перейдите в «Купить / Продлить»'
+        lic_line = '🔴 Нет активной подписки'
+        exp_line = '💡 Раздел «Купить / Продлить» откроет инструменты'
 
     await call.message.edit_text(
         f'{LOGO}\n\n'
-        f'👤 <b>{name}</b>\n\n'
-        f'{lic_line}\n'
+        f'👤 <b>{name}</b>  ·  {lic_line}\n'
         f'{exp_line}\n\n'
-        f'Выберите раздел 👇',
+        f'{DIVIDER}\n'
+        f'<b>🛠 Инструменты</b>\n'
+        f'🌐 Прокси — безопасность аккаунтов\n'
+        f'👤 Аккаунты — подключение TG-аккаунтов\n'
+        f'🎯 Аудитория — сбор целевой базы\n'
+        f'📨 Рассылка — массовые сообщения\n\n'
+        f'<b>⚙️ Аккаунт</b>\n'
+        f'🛡 Лицензии · 🔑 Ключи · 👥 Рефералы · ⭐️ Отзыв\n\n'
+        f'👇 Выберите раздел',
         reply_markup=kb_main()
     )
 
