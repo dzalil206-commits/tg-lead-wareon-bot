@@ -44,7 +44,7 @@ dp  = Dispatcher(storage=MemoryStorage())
 
 # ===== ДИЗАЙН =====
 DIVIDER = '━━━━━━━━━━━━━━━━━━━━━━'
-LOGO    = f'{DIVIDER}\n    🔥 <b>TG LEAD WAREON</b>\n{DIVIDER}'
+LOGO    = '🔥 <b>TG Lead Wareon</b>'
 
 PLAN_ICONS = {'Miner': '⛏️', 'Sender': '📨', 'Start': '🚀', 'Pro': '⚡', 'Scale': '👑'}
 PLAN_DESC  = {
@@ -350,13 +350,11 @@ async def is_subscribed(user_id: int) -> bool:
 def _sub_gate_text() -> str:
     return (
         f'{LOGO}\n\n'
-        f'🚀 <b>Твой центр роста в Telegram</b>\n\n'
-        f'🌐 Прокси · 👤 Аккаунты · 🎯 Сбор аудитории · 📨 Умные рассылки — '
-        f'всё в одном боте, без рутины.\n'
-        f'⚡ Запусти поток целевого трафика быстро и просто.\n\n'
-        f'{DIVIDER}\n\n'
-        f'🔒 <b>Чтобы начать — подпишитесь на канал</b>\n\n'
-        f'<i>Там обновления, кейсы и фишки сервиса.</i>'
+        f'<b>Центр привлечения клиентов в Telegram.</b>\n\n'
+        f'Сбор целевой аудитории и умные рассылки — в одном боте, '
+        f'без программ на компьютере.\n\n'
+        f'<blockquote>🔒 Чтобы начать — подпишитесь на канал.\n'
+        f'Там обновления, кейсы и фишки сервиса.</blockquote>'
     )
 
 
@@ -427,36 +425,31 @@ async def _enter_app(from_user, answer_msg=None, edit_call=None):
 
     if active:
         soonest   = min(active, key=lambda l: l['days_left'])
-        plans     = ' · '.join(sorted({l['product'] for l in active}))
+        plans     = ', '.join(sorted({l['product'] for l in active}))
         status_ln = (
-            f'💎 <b>Доступ открыт</b> · {plans}\n'
-            f'📅 Активен до {format_date(soonest["expires_at"])}'
+            f'<blockquote>💎 Доступ открыт · {plans}\n'
+            f'Активен до {format_date(soonest["expires_at"])}</blockquote>'
         )
     else:
         status_ln = (
-            f'🆓 <b>Бесплатный режим</b>\n'
-            f'🔓 Оформите доступ, чтобы запустить инструменты'
+            f'<blockquote>🆓 Бесплатный режим. Оформите доступ — '
+            f'и инструменты разблокируются.</blockquote>'
         )
 
     text = (
         f'{LOGO}\n\n'
-        f'👋 <b>{name}</b>, добро пожаловать!\n\n'
-        f'Это твой центр привлечения клиентов в Telegram — '
-        f'<b>сбор целевой аудитории и умные рассылки</b> прямо в боте, '
-        f'без программ на компьютере.\n\n'
-        f'{DIVIDER}\n'
-        f'✨ <b>Что умеет бот</b>\n\n'
-        f'🌐 <b>Прокси</b> — стабильная и безопасная работа аккаунтов\n'
-        f'👤 <b>Аккаунты</b> — подключение по номеру или импортом сессии\n'
-        f'🎯 <b>Аудитория</b> — сбор базы из открытых чатов и каналов\n'
-        f'📨 <b>Рассылка</b> — массовые сообщения с AI-текстами и имитацией человека\n\n'
-        f'{DIVIDER}\n'
-        f'💡 <b>Как это работает</b>\n'
-        f'1️⃣ Подключи аккаунт  →  2️⃣ Собери базу  →  '
-        f'3️⃣ Запусти рассылку  →  4️⃣ Получай заявки\n\n'
-        f'{DIVIDER}\n'
-        f'{status_ln}\n\n'
-        f'👇 Жми <b>«Начать работу»</b> — и поехали'
+        f'<b>{name}, добро пожаловать.</b>\n\n'
+        f'Сбор целевой аудитории и умные рассылки в Telegram — '
+        f'прямо в боте, без программ на компьютере.\n\n'
+        f'<blockquote>Подключите аккаунт → соберите базу → '
+        f'запустите рассылку → получайте заявки.</blockquote>\n'
+        f'<b>Возможности</b>\n'
+        f'• <b>Прокси</b> — безопасная и стабильная работа аккаунтов\n'
+        f'• <b>Аккаунты</b> — подключение по номеру или импортом сессии\n'
+        f'• <b>Аудитория</b> — сбор базы из открытых чатов и каналов\n'
+        f'• <b>Рассылка</b> — AI-тексты, spintax и имитация живого общения\n\n'
+        f'{status_ln}\n'
+        f'Нажмите кнопку ниже, чтобы начать 👇'
     )
     if edit_call:
         await edit_call.message.edit_text(text, reply_markup=kb_home(),
@@ -491,25 +484,27 @@ async def cb_menu(call: CallbackQuery, state: FSMContext):
 
     if active:
         soonest  = min(active, key=lambda l: l['days_left'])
-        lic_line = f'🟢 Доступ активен  ·  {len(active)} лиц.'
-        exp_line = f'📅 До {format_date(soonest["expires_at"])}'
+        status   = (
+            f'<blockquote>💎 Доступ активен · {len(active)} лиц.\n'
+            f'До {format_date(soonest["expires_at"])}</blockquote>'
+        )
     else:
-        lic_line = '🔴 Нет активной подписки'
-        exp_line = '💡 Раздел «Купить / Продлить» откроет инструменты'
+        status   = (
+            f'<blockquote>🔴 Нет активной подписки. '
+            f'Оформите доступ в разделе «Купить».</blockquote>'
+        )
 
     await call.message.edit_text(
-        f'{LOGO}\n\n'
-        f'👤 <b>{name}</b>  ·  {lic_line}\n'
-        f'{exp_line}\n\n'
-        f'{DIVIDER}\n'
-        f'<b>🛠 Инструменты</b>\n'
-        f'🌐 Прокси — безопасность аккаунтов\n'
-        f'👤 Аккаунты — подключение TG-аккаунтов\n'
-        f'🎯 Аудитория — сбор целевой базы\n'
-        f'📨 Рассылка — массовые сообщения\n\n'
-        f'<b>⚙️ Аккаунт</b>\n'
-        f'🛡 Лицензии · 🔑 Ключи · 👥 Рефералы · ⭐️ Отзыв\n\n'
-        f'👇 Выберите раздел',
+        f'{LOGO}  ·  <b>{name}</b>\n\n'
+        f'{status}\n'
+        f'<b>Инструменты</b>\n'
+        f'• 🌐 Прокси — безопасность аккаунтов\n'
+        f'• 👤 Аккаунты — подключение TG-аккаунтов\n'
+        f'• 🎯 Аудитория — сбор целевой базы\n'
+        f'• 📨 Рассылка — массовые сообщения\n\n'
+        f'<b>Аккаунт</b>\n'
+        f'• 🛡 Лицензии · 🔑 Ключи · 👥 Рефералы · ⭐️ Отзыв\n\n'
+        f'<i>Выберите раздел ниже</i> 👇',
         reply_markup=kb_main()
     )
 
@@ -528,26 +523,23 @@ async def _profile_view(tg_id: str, from_user) -> tuple[str, InlineKeyboardMarku
     username = f'@{from_user.username}' if from_user.username else '—'
     joined   = format_date(user['joined_at']) if user else '—'
 
-    # Статус-плашка
-    if active:
-        plan_names = ' · '.join(sorted({l['product'] for l in active}))
-        status     = f'💎 <b>PREMIUM</b> · {plan_names}'
-    else:
-        status     = '🆓 <b>FREE</b> · без активной подписки'
+    status = (
+        f'💎 Статус: <b>Premium</b> · {", ".join(sorted({l["product"] for l in active}))}'
+        if active else
+        '🆓 Статус: <b>Бесплатный</b> · без активной подписки'
+    )
 
     lines = [
         f'👤 <b>Личный кабинет</b>',
-        DIVIDER,
         '',
-        status,
+        f'<blockquote>{status}</blockquote>',
+        f'<b>Профиль</b>',
+        f'• Имя: {name}',
+        f'• Username: {username}',
+        f'• ID: <code>{tg_id}</code>',
+        f'• В боте с: {joined}',
         '',
-        f'<b>Имя:</b> {name}',
-        f'<b>Username:</b> {username}',
-        f'<b>ID:</b> <code>{tg_id}</code>',
-        f'<b>В боте с:</b> {joined}',
-        '',
-        DIVIDER,
-        '🛡 <b>Подписки</b>',
+        f'<b>Подписки</b>',
     ]
 
     if active:
@@ -555,19 +547,17 @@ async def _profile_view(tg_id: str, from_user) -> tuple[str, InlineKeyboardMarku
             icon = PLAN_ICONS.get(l['product'], '📦')
             bar  = license_progress(l)
             lines.append(
-                f'\n{icon} <b>{l["product"]}</b> · {status_badge(l["days_left"])}\n'
-                f'   {bar}\n'
-                f'   📅 до {format_date(l["expires_at"])}'
+                f'{icon} <b>{l["product"]}</b> — {status_badge(l["days_left"])}\n'
+                f'<code>{bar}</code>  до {format_date(l["expires_at"])}'
             )
     else:
-        lines.append('\n🔴 Нет активных подписок\n   Оформите доступ, чтобы открыть инструменты.')
+        lines.append('<i>Активных подписок нет — оформите доступ, чтобы открыть инструменты.</i>')
 
     lines += [
         '',
-        DIVIDER,
-        '📈 <b>Активность</b>',
-        f'👥 Рефералов: <b>{ref_cnt}</b>  ·  🎁 заработано <b>+{ref_cnt} дн.</b>',
-        f'⭐️ Отзывов: <b>{rev_cnt}</b>',
+        f'<b>Активность</b>',
+        f'• Рефералов: <b>{ref_cnt}</b> (заработано +{ref_cnt} дн.)',
+        f'• Отзывов: <b>{rev_cnt}</b>',
     ]
 
     text = '\n'.join(lines)
