@@ -46,8 +46,9 @@ dp  = Dispatcher(storage=MemoryStorage())
 DIVIDER = '━━━━━━━━━━━━━━━━━━━━━━'
 LOGO    = '🔥 <b>TG Lead Wareon</b>'
 
-PLAN_ICONS = {'Miner': '⛏️', 'Sender': '📨', 'Start': '🚀', 'Pro': '⚡', 'Scale': '👑'}
+PLAN_ICONS = {'Trial': '🎁', 'Miner': '⛏️', 'Sender': '📨', 'Start': '🚀', 'Pro': '⚡', 'Scale': '👑'}
 PLAN_DESC  = {
+    'Trial':  'пробный доступ',
     'Miner':  'парсинг аудитории',
     'Sender': 'массовые рассылки',
     'Start':  'Miner + Sender',
@@ -55,6 +56,10 @@ PLAN_DESC  = {
     'Scale':  'всё включено',
 }
 PLAN_PRICE = {'Miner': '490', 'Sender': '990', 'Start': '990', 'Pro': '2 490', 'Scale': '6 990'}
+
+# Продукты, которые показываем в витрине тарифов (Trial выдаётся отдельной кнопкой)
+PAID_PLANS = ['Miner', 'Sender', 'Start', 'Pro', 'Scale']
+TRIAL_DAYS = 2
 
 
 def status_badge(days: int) -> str:
@@ -110,6 +115,9 @@ async def db_init():
                 username       TEXT    DEFAULT '',
                 referred_by    TEXT,
                 notify_enabled INTEGER DEFAULT 1,
+                onboarded      INTEGER DEFAULT 0,
+                trial_used     INTEGER DEFAULT 0,
+                sub_verified_at TEXT,
                 joined_at      TEXT    DEFAULT (datetime('now'))
             );
             CREATE TABLE IF NOT EXISTS licenses (
@@ -130,11 +138,17 @@ async def db_init():
             );
             CREATE INDEX IF NOT EXISTS idx_lic_tg ON licenses(tg_id);
         ''')
-        # Ленивая миграция для старых баз
-        try:
-            await db.execute('ALTER TABLE users ADD COLUMN notify_enabled INTEGER DEFAULT 1')
-        except Exception:
-            pass
+        # Ленивые миграции для старых баз
+        for ddl in (
+            'ALTER TABLE users ADD COLUMN notify_enabled INTEGER DEFAULT 1',
+            'ALTER TABLE users ADD COLUMN onboarded INTEGER DEFAULT 0',
+            'ALTER TABLE users ADD COLUMN trial_used INTEGER DEFAULT 0',
+            'ALTER TABLE users ADD COLUMN sub_verified_at TEXT',
+        ):
+            try:
+                await db.execute(ddl)
+            except Exception:
+                pass
         await db.commit()
 
 
@@ -241,6 +255,53 @@ async def db_toggle_notify(tg_id: str) -> bool:
     return bool(new_val)
 
 
+async def db_is_onboarded(tg_id: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT onboarded FROM users WHERE tg_id=?', (tg_id,)) as cur:
+            row = await cur.fetchone()
+            return bool(row[0]) if row and row[0] else False
+
+
+async def db_mark_onboarded(tg_id: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET onboarded=1, sub_verified_at=datetime('now') WHERE tg_id=?",
+            (tg_id,)
+        )
+        await db.commit()
+
+
+async def db_has_active_license(tg_id: str) -> bool:
+    licenses = await db_get_licenses(tg_id)
+    return any(not l['is_expired'] for l in licenses)
+
+
+async def db_trial_used(tg_id: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT trial_used FROM users WHERE tg_id=?', (tg_id,)) as cur:
+            row = await cur.fetchone()
+            return bool(row[0]) if row and row[0] else False
+
+
+async def db_use_trial(tg_id: str) -> bool:
+    """Атомарно активирует триал: если ещё не использован — выдаёт лицензию Trial
+    на TRIAL_DAYS и ставит флаг. Возвращает True при успехе, False если уже был."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute('SELECT trial_used FROM users WHERE tg_id=?', (tg_id,)) as cur:
+            row = await cur.fetchone()
+        if row and row[0]:
+            return False
+        key     = _gen_key()
+        expires = (datetime.utcnow() + timedelta(days=TRIAL_DAYS)).date().isoformat()
+        await db.execute(
+            'INSERT INTO licenses (tg_id, product, license_key, expires_at) VALUES (?,?,?,?)',
+            (tg_id, 'Trial', key, expires)
+        )
+        await db.execute('UPDATE users SET trial_used=1 WHERE tg_id=?', (tg_id,))
+        await db.commit()
+        return True
+
+
 async def db_expiring_today(days_ahead: int) -> list[dict]:
     target = (datetime.utcnow() + timedelta(days=days_ahead)).date().isoformat()
     today  = datetime.utcnow().date().isoformat()
@@ -285,28 +346,40 @@ def kb_home() -> InlineKeyboardMarkup:
     ])
 
 
-def kb_main() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def kb_main(show_trial: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    # Для новичков — широкая CTA-кнопка триала по центру, над инструментами
+    if show_trial:
+        rows.append([InlineKeyboardButton(text='🎁  Попробовать бесплатно  🎁',
+                                          callback_data='trial_start')])
+    rows += [
         [
-            InlineKeyboardButton(text='🌐 Прокси',    callback_data='proxies'),
-            InlineKeyboardButton(text='👤 Аккаунты',  callback_data='accounts'),
+            InlineKeyboardButton(text='🔥 AI-Прогрев',     callback_data='warmup'),
+            InlineKeyboardButton(text='👤 Аккаунты',       callback_data='accounts'),
         ],
         [
-            InlineKeyboardButton(text='🎯 Аудитория', callback_data='audience'),
-            InlineKeyboardButton(text='📨 Рассылка',  callback_data='sending'),
+            InlineKeyboardButton(text='📨 Рассылки',       callback_data='sending'),
+            InlineKeyboardButton(text='🎯 Автосбор',       callback_data='audience'),
+        ],
+        [
+            InlineKeyboardButton(text='🤖 Автоответ',      callback_data='autoreply'),
+            InlineKeyboardButton(text='📊 Лиды',           callback_data='leads'),
         ],
         [InlineKeyboardButton(text='🚀 Как начать (4 шага)', callback_data='howto')],
-        [InlineKeyboardButton(text='🛡 Мои лицензии',         callback_data='licenses')],
         [
-            InlineKeyboardButton(text='💳 Купить / Продлить', callback_data='buy'),
-            InlineKeyboardButton(text='🔑 Ключ',              callback_data='get_key'),
+            InlineKeyboardButton(text='👤 Профиль',        callback_data='profile'),
+            InlineKeyboardButton(text='🛡 Лицензии',       callback_data='licenses'),
         ],
-        [InlineKeyboardButton(text='👥 Реферальная программа', callback_data='referral')],
         [
-            InlineKeyboardButton(text='⭐️ Отзыв  +2 дня', callback_data='review'),
+            InlineKeyboardButton(text='💳 Купить',         callback_data='buy'),
+            InlineKeyboardButton(text='👥 Рефералы',       callback_data='referral'),
+        ],
+        [
+            InlineKeyboardButton(text='⭐️ Отзыв +2 дня',  callback_data='review'),
             InlineKeyboardButton(text='💬 Поддержка',      url=SUPPORT_URL),
         ],
-    ])
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kb_back() -> InlineKeyboardMarkup:
@@ -384,11 +457,6 @@ async def _require_license(call: CallbackQuery) -> list[dict] | None:
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
 
-    if not await is_subscribed(message.from_user.id):
-        await message.answer(_sub_gate_text(), reply_markup=kb_subscribe(),
-                             disable_web_page_preview=True)
-        return
-
     tg_id = str(message.from_user.id)
     args  = message.text.split(maxsplit=1)
 
@@ -413,6 +481,15 @@ async def cmd_start(message: Message, state: FSMContext):
             await bot.send_message(int(ref_by), f'🎉 <b>+1 день</b> к лицензии — к вам присоединился реферал!')
         except Exception:
             pass
+
+    # Гейт подписки — ТОЛЬКО при первом заходе. После прохождения никогда не повторяется.
+    if not await db_is_onboarded(tg_id):
+        if await is_subscribed(message.from_user.id):
+            await db_mark_onboarded(tg_id)
+        else:
+            await message.answer(_sub_gate_text(), reply_markup=kb_subscribe(),
+                                 disable_web_page_preview=True)
+            return
 
     await _enter_app(message.from_user, answer_msg=message)
 
@@ -480,6 +557,7 @@ async def cb_check_sub(call: CallbackQuery, state: FSMContext):
         await call.answer('Спасибо за подписку! 🎉')
         tg_id = str(call.from_user.id)
         await db_ensure_user(tg_id, call.from_user.first_name or '', call.from_user.username or '')
+        await db_mark_onboarded(tg_id)   # гейт больше не покажем никогда
         await _enter_app(call.from_user, edit_call=call)
     else:
         await call.answer('Вы ещё не подписались на канал 😔', show_alert=True)
@@ -494,6 +572,7 @@ async def cb_menu(call: CallbackQuery, state: FSMContext):
     name     = call.from_user.first_name or 'друг'
     licenses = await db_get_licenses(tg_id)
     active   = [l for l in licenses if not l['is_expired']]
+    trial_avail = not active and not await db_trial_used(tg_id)
 
     if active:
         soonest  = min(active, key=lambda l: l['days_left'])
@@ -501,24 +580,76 @@ async def cb_menu(call: CallbackQuery, state: FSMContext):
             f'<blockquote>💎 Доступ активен · {len(active)} лиц.\n'
             f'До {format_date(soonest["expires_at"])}</blockquote>'
         )
+    elif trial_avail:
+        status   = (
+            f'<blockquote>🎁 Тебе доступен бесплатный период на '
+            f'{TRIAL_DAYS} дня. Жми «Попробовать бесплатно» 👇</blockquote>'
+        )
     else:
         status   = (
             f'<blockquote>🔴 Нет активной подписки. '
-            f'Оформите доступ в разделе «Купить».</blockquote>'
+            f'Оформи доступ в разделе «Купить».</blockquote>'
         )
 
     await call.message.edit_text(
         f'{LOGO}  ·  <b>{name}</b>\n\n'
         f'{status}\n'
-        f'<b>Инструменты</b>\n'
-        f'• 🌐 Прокси — безопасность аккаунтов\n'
-        f'• 👤 Аккаунты — подключение TG-аккаунтов\n'
-        f'• 🎯 Аудитория — сбор целевой базы\n'
-        f'• 📨 Рассылка — массовые сообщения\n\n'
-        f'<b>Аккаунт</b>\n'
-        f'• 🛡 Лицензии · 🔑 Ключи · 👥 Рефералы · ⭐️ Отзыв\n\n'
-        f'<i>Выберите раздел ниже</i> 👇',
-        reply_markup=kb_main()
+        f'<b>Рабочее пространство</b>\n'
+        f'• 🔥 AI-Прогрев — отлёжка и защита от бана\n'
+        f'• 👤 Аккаунты — подключение и менеджмент TG-аккаунтов\n'
+        f'• 📨 Рассылки — 3 режима с AI-уникализацией\n'
+        f'• 🎯 Автосбор — целевая база из чатов и каналов\n'
+        f'• 🤖 Автоответ — AI-ответы на входящие\n'
+        f'• 📊 Лиды — воронка ответивших и аналитика\n\n'
+        f'<i>Выбери раздел ниже</i> 👇',
+        reply_markup=kb_main(show_trial=trial_avail)
+    )
+
+
+# ==================== ТРИАЛ ====================
+
+@dp.callback_query(F.data == 'trial_start')
+async def cb_trial_start(call: CallbackQuery):
+    tg_id = str(call.from_user.id)
+    if await db_has_active_license(tg_id):
+        await call.answer('У тебя уже есть активный доступ 🎉', show_alert=True)
+        return
+    if await db_trial_used(tg_id):
+        await call.answer('Пробный период уже был активирован', show_alert=True)
+        return
+    await call.message.edit_text(
+        f'🎁 <b>Бесплатный доступ на {TRIAL_DAYS} дня</b>\n\n'
+        f'Полный функционал без оплаты — попробуй всё и убедись сам:\n'
+        f'• 🔥 AI-прогрев аккаунтов\n'
+        f'• 👤 Менеджер аккаунтов\n'
+        f'• 🎯 Автосбор аудитории\n'
+        f'• 📨 Умные рассылки (3 режима)\n'
+        f'• 🤖 Автоответ\n\n'
+        f'<blockquote>Без карты и оплаты. Активируется мгновенно.</blockquote>',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f'✅ Использовать бесплатно {TRIAL_DAYS} дня',
+                                  callback_data='trial_activate')],
+            [InlineKeyboardButton(text='⬅️ Назад', callback_data='menu')],
+        ])
+    )
+
+
+@dp.callback_query(F.data == 'trial_activate')
+async def cb_trial_activate(call: CallbackQuery):
+    tg_id = str(call.from_user.id)
+    ok = await db_use_trial(tg_id)
+    if not ok:
+        await call.answer('Пробный период уже был активирован', show_alert=True)
+        return
+    await call.answer('Пробный период активирован! 🎉')
+    await call.message.edit_text(
+        f'✅ <b>Пробный период активирован</b>\n\n'
+        f'🎁 Тебе открыт полный доступ на <b>{TRIAL_DAYS} дня</b>.\n\n'
+        f'<blockquote>Вернись в меню и начни работу — все инструменты '
+        f'уже разблокированы.</blockquote>',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='⬅️ Назад в меню', callback_data='menu')],
+        ])
     )
 
 
@@ -610,25 +741,25 @@ async def cb_profile_notify(call: CallbackQuery):
 @dp.callback_query(F.data == 'howto')
 async def cb_howto(call: CallbackQuery):
     await call.message.edit_text(
-        f'🚀 <b>Как начать? Проще, чем кажется</b>\n{DIVIDER}\n\n'
-        f'<b>{{ 1 }}</b> 🌐 Добавьте прокси\n'
-        f'<i>чтобы аккаунты работали стабильно и безопасно</i>\n\n'
-        f'<b>{{ 2 }}</b> 👤 Подключите аккаунты\n'
-        f'<i>по номеру телефона или импортом сессии</i>\n\n'
-        f'<b>{{ 3 }}</b> 🎯 Соберите базу юзеров/чатов\n'
-        f'<i>автоматически из открытых чатов и каналов</i>\n\n'
-        f'<b>{{ 4 }}</b> 📨 Запустите рассылку по базам\n'
-        f'<i>с имитацией человека и AI-вариантами текста</i>\n\n'
-        f'{DIVIDER}\n'
-        f'📚 В каждом разделе есть подробные инструкции.',
+        f'🚀 <b>Как начать? 4 простых шага</b>\n\n'
+        f'<b>1.</b> 👤 <b>Подключи аккаунт</b>\n'
+        f'<i>по номеру (код + 2FA) или импортом сессии. Прокси привязывается тут же.</i>\n\n'
+        f'<b>2.</b> 🔥 <b>Прогрей аккаунт</b>\n'
+        f'<i>отлёжка и человеческая активность — чтобы не словить бан.</i>\n\n'
+        f'<b>3.</b> 🎯 <b>Собери базу</b>\n'
+        f'<i>автоматически из открытых чатов и каналов по твоей нише.</i>\n\n'
+        f'<b>4.</b> 📨 <b>Запусти рассылку</b>\n'
+        f'<i>AI-тексты, имитация живого общения, статистика в реальном времени.</i>\n\n'
+        f'<blockquote>Ответившие автоматически попадают в «Лиды» — '
+        f'там удобно вести их до сделки.</blockquote>',
         reply_markup=kb_section(
             [
-                InlineKeyboardButton(text='🌐 Прокси',   callback_data='proxies'),
-                InlineKeyboardButton(text='👤 Аккаунты', callback_data='accounts'),
+                InlineKeyboardButton(text='👤 Аккаунты',   callback_data='accounts'),
+                InlineKeyboardButton(text='🔥 Прогрев',    callback_data='warmup'),
             ],
             [
-                InlineKeyboardButton(text='🎯 Аудитория', callback_data='audience'),
-                InlineKeyboardButton(text='📨 Рассылка',  callback_data='sending'),
+                InlineKeyboardButton(text='🎯 Автосбор',   callback_data='audience'),
+                InlineKeyboardButton(text='📨 Рассылки',   callback_data='sending'),
             ],
         )
     )
@@ -636,82 +767,182 @@ async def cb_howto(call: CallbackQuery):
 
 # ==================== РАЗДЕЛЫ ПРОДУКТА ====================
 
-@dp.callback_query(F.data == 'proxies')
-async def cb_proxies(call: CallbackQuery):
+def _soon_kb(*extra_rows) -> InlineKeyboardMarkup:
+    rows = [list(r) for r in extra_rows]
+    rows.append([InlineKeyboardButton(text='💬 Поддержка', url=SUPPORT_URL)])
+    rows.append([InlineKeyboardButton(text='🏠 Главное меню', callback_data='menu')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ---------- 🔥 AI-Прогрев ----------
+@dp.callback_query(F.data == 'warmup')
+async def cb_warmup(call: CallbackQuery):
     if not await _require_license(call):
         return
     await call.message.edit_text(
-        f'🌐 <b>Прокси</b>\n{DIVIDER}\n\n'
-        f'Прокси нужны, чтобы аккаунты работали стабильно и не попадали под ограничения.\n\n'
-        f'<b>Форматы:</b>\n'
-        f'<code>socks5://user:pass@host:port</code>\n'
-        f'<code>host:port:login:password</code>\n\n'
-        f'📖 <b>Инструкция:</b> добавьте прокси списком, проверьте на валидность и '
-        f'распределите по аккаунтам — последовательно или случайно.\n\n'
-        f'<i>🔧 Полное управление прокси через бота — скоро.</i>',
-        reply_markup=kb_section(
-            [InlineKeyboardButton(text='💬 Поддержка', url=SUPPORT_URL)],
-        )
+        f'🔥 <b>AI-Прогрев аккаунта</b>\n\n'
+        f'Свежий аккаунт сразу в рассылку — прямой путь в бан. Прогрев имитирует '
+        f'поведение живого человека и снимает «подозрительность» с аккаунта.\n\n'
+        f'<b>Что делает бот сам:</b>\n'
+        f'• краткие заходы и «отлёжка»\n'
+        f'• установка username, аватара, описания\n'
+        f'• вступление в каналы, чтение, просмотр историй\n'
+        f'• живой диалог между аккаунтами\n'
+        f'• включение 2FA, сброс лишних сессий\n\n'
+        f'<b>Пресеты:</b>\n'
+        f'🎯 Новый аккаунт · 3 дня\n'
+        f'⚡ Быстрый · 24 часа\n'
+        f'🛡 Глубокий · 7 дней\n\n'
+        f'<blockquote>🔧 Запуск прогрева прямо в боте — на финальной стадии '
+        f'разработки.</blockquote>',
+        reply_markup=_soon_kb()
     )
 
 
+# ---------- 👤 Менеджер аккаунтов ----------
 @dp.callback_query(F.data == 'accounts')
 async def cb_accounts(call: CallbackQuery):
     if not await _require_license(call):
         return
     await call.message.edit_text(
-        f'👤 <b>Аккаунты</b>\n{DIVIDER}\n\n'
-        f'Подключите Telegram-аккаунты для сбора аудитории и рассылок.\n\n'
-        f'<b>Способы подключения:</b>\n'
+        f'👤 <b>Менеджер аккаунтов</b>\n\n'
+        f'Централизованное управление всеми Telegram-аккаунтами из одного окна.\n\n'
+        f'<b>Подключение:</b>\n'
         f'• по номеру телефона (код + 2FA)\n'
         f'• импорт .session / TData\n\n'
-        f'📖 <b>Инструкция:</b> привяжите прокси к аккаунту, проверьте статус '
-        f'(жив / ограничен / требует входа), настройте профиль и прогрев.\n\n'
-        f'<i>🔧 Подключение аккаунтов через бота — скоро.</i>',
-        reply_markup=kb_section(
-            [InlineKeyboardButton(text='💬 Поддержка', url=SUPPORT_URL)],
+        f'<b>Возможности:</b>\n'
+        f'• снять спам-блок, проверить валидность и «живучесть»\n'
+        f'• сменить профиль: аватар, имя, юзернейм, описание, личный канал\n'
+        f'• статус каждого аккаунта: жив / ограничен / нужен вход\n\n'
+        f'<blockquote>⚠️ Перед добавлением аккаунта обязательно подключи '
+        f'прокси — без него аккаунт быстро блокируют. Нет прокси? Купи у нас или '
+        f'подключи свой.</blockquote>'
+        f'🔧 <i>Подключение аккаунтов прямо в боте — на финальной стадии разработки.</i>',
+        reply_markup=_soon_kb(
+            [InlineKeyboardButton(text='🛒 Купить прокси', url=SUPPORT_URL)],
         )
     )
 
 
+# ---------- 🎯 Автосбор аудитории ----------
 @dp.callback_query(F.data == 'audience')
 async def cb_audience(call: CallbackQuery):
     if not await _require_license(call):
         return
+    await _maybe_warmup_hint(call, 'audience') or await _render_audience(call)
+
+
+async def _render_audience(call: CallbackQuery):
     await call.message.edit_text(
-        f'🎯 <b>Аудитория</b>\n{DIVIDER}\n\n'
-        f'Соберите целевую базу из открытых чатов и каналов автоматически.\n\n'
-        f'<b>Что собирается:</b> username, ID, имя, активность.\n'
-        f'<b>Фильтры:</b> онлайн-статус, язык, активность.\n\n'
-        f'📖 <b>Инструкция:</b> укажите чаты/каналы → запустите сбор → получите готовую '
-        f'базу для рассылки.\n\n'
+        f'🎯 <b>Автосбор аудитории</b>\n\n'
+        f'Бот сам собирает целевую базу из открытых чатов и каналов.\n\n'
+        f'<b>Источники:</b> участники чатов, комментаторы каналов, '
+        f'поиск по ключевым словам, аудитория конкурентов.\n'
+        f'<b>Фильтры:</b> онлайн, активность, язык, наличие username, premium.\n\n'
+        f'<b>На выходе:</b> готовая база с дедупликацией — сразу в рассылку.\n\n'
         f'⚖️ Сбор — только из <b>открытых</b> источников.\n\n'
-        f'<i>🔧 Запуск сбора через бота — скоро.</i>',
-        reply_markup=kb_section(
-            [InlineKeyboardButton(text='💬 Поддержка', url=SUPPORT_URL)],
-        )
+        f'<blockquote>🔧 Запуск сбора прямо в боте — на финальной стадии '
+        f'разработки.</blockquote>',
+        reply_markup=_soon_kb()
     )
 
 
+# ---------- 📨 Умные рассылки ----------
 @dp.callback_query(F.data == 'sending')
 async def cb_sending(call: CallbackQuery):
     if not await _require_license(call):
         return
+    await _maybe_warmup_hint(call, 'sending') or await _render_sending(call)
+
+
+async def _render_sending(call: CallbackQuery):
     await call.message.edit_text(
-        f'📨 <b>Рассылка</b>\n{DIVIDER}\n\n'
-        f'Запустите умную рассылку по собранным базам.\n\n'
-        f'<b>Возможности:</b>\n'
-        f'• персонализация, spintax, AI-варианты текста\n'
-        f'• имитация человека: «печатает», задержки, паузы\n'
-        f'• чередование вариантов по весам, антидубли\n'
-        f'• статистика доставки и логи\n\n'
-        f'📖 <b>Инструкция:</b> выберите аккаунт → базу → текст → лимиты → запуск.\n\n'
-        f'⚖️ Рассылки — только тем, кто дал согласие (38-ФЗ). Спам запрещён.\n\n'
-        f'<i>🔧 Запуск рассылок через бота — скоро.</i>',
-        reply_markup=kb_section(
-            [InlineKeyboardButton(text='💬 Поддержка', url=SUPPORT_URL)],
-        )
+        f'📨 <b>Умные авторассылки</b>\n\n'
+        f'Три режима с AI-уникализацией каждого сообщения — от быстрого старта '
+        f'до интеллектуального диалога, который ведёт беседу за тебя.\n\n'
+        f'<b>1. Базовая</b> · просто\n'
+        f'<i>AI перефразирует текст под каждого, обходя спам-фильтры. Быстрый старт.</i>\n\n'
+        f'<b>2. Многофазная</b> · макс. конверсия\n'
+        f'<i>ИИ начинает естественный диалог и в нужный момент органично предлагает '
+        f'твой продукт. Получатель не отличит от реального общения.</i>\n\n'
+        f'<b>3. Через PostBot</b> · массовый охват\n'
+        f'<i>тысячи сообщений через @PostBot для широких кампаний.</i>\n\n'
+        f'<blockquote>💡 От 0.1$ за клиента · конверсия многофазной в 3–5 раз выше '
+        f'обычной рассылки.</blockquote>'
+        f'⚖️ Только тем, кто дал согласие (38-ФЗ). Спам запрещён.\n\n'
+        f'🔧 <i>Запуск рассылок прямо в боте — на финальной стадии разработки.</i>',
+        reply_markup=_soon_kb()
     )
+
+
+# ---------- 🤖 Автоответ ----------
+@dp.callback_query(F.data == 'autoreply')
+async def cb_autoreply(call: CallbackQuery):
+    if not await _require_license(call):
+        return
+    await call.message.edit_text(
+        f'🤖 <b>Автоответчик</b>\n\n'
+        f'Бот сам отвечает на входящие сообщения — ты не теряешь ни одного лида, '
+        f'даже когда не в сети.\n\n'
+        f'<b>Два режима:</b>\n'
+        f'• 🧠 <b>AI-промт</b> — задаёшь характер и задачу, ИИ ведёт диалог живым языком\n'
+        f'• 📝 <b>Фиксированный ответ</b> — один заранее заданный текст на все входящие\n\n'
+        f'<b>Гибкая настройка:</b> выбор аккаунта(ов) для автоответа, рабочие часы.\n\n'
+        f'<blockquote>🔧 Настройка автоответа прямо в боте — на финальной стадии '
+        f'разработки.</blockquote>',
+        reply_markup=_soon_kb()
+    )
+
+
+# ---------- 📊 Лиды / Аналитика ----------
+@dp.callback_query(F.data == 'leads')
+async def cb_leads(call: CallbackQuery):
+    if not await _require_license(call):
+        return
+    await call.message.edit_text(
+        f'📊 <b>Лиды и аналитика</b>\n\n'
+        f'Каждый, кто ответил на рассылку, автоматически попадает сюда — '
+        f'и ты ведёшь его до сделки.\n\n'
+        f'<b>Воронка лида:</b>\n'
+        f'🆕 Новый → 💬 В диалоге → ✅ Квалифицирован → 🤝 Клиент\n\n'
+        f'<b>Аналитика кампаний:</b>\n'
+        f'• отправлено / доставлено / ответили\n'
+        f'• конверсия и <b>цена за лид</b>\n'
+        f'• эффективность по аккаунтам и текстам\n\n'
+        f'<blockquote>💡 Это то, чего нет у конкурентов: они собирают ответы, '
+        f'но не помогают довести их до денег.</blockquote>'
+        f'🔧 <i>Раздел появится вместе с запуском рассылок.</i>',
+        reply_markup=_soon_kb()
+    )
+
+
+# ---------- Напоминание о прогреве (необязательное) ----------
+async def _maybe_warmup_hint(call: CallbackQuery, target: str) -> bool:
+    """Показывает необязательную плашку про прогрев перед рассылкой/сбором.
+    Возвращает True, если плашка показана (значит, основной экран рендерить не нужно)."""
+    await call.message.edit_text(
+        f'⚠️ <b>Сначала прогрей аккаунты</b>\n\n'
+        f'Рассылка и активный сбор с «холодного» аккаунта — главная причина банов. '
+        f'Рекомендуем прогреть аккаунты перед запуском.\n\n'
+        f'<blockquote>Это совет, а не требование — решай сам.</blockquote>',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='🔥 Перейти к прогреву', callback_data='warmup')],
+            [InlineKeyboardButton(text='➡️ Продолжить без прогрева',
+                                  callback_data=f'skipwarm_{target}')],
+            [InlineKeyboardButton(text='🏠 Главное меню', callback_data='menu')],
+        ])
+    )
+    return True
+
+
+@dp.callback_query(F.data == 'skipwarm_sending')
+async def cb_skipwarm_sending(call: CallbackQuery):
+    await _render_sending(call)
+
+
+@dp.callback_query(F.data == 'skipwarm_audience')
+async def cb_skipwarm_audience(call: CallbackQuery):
+    await _render_audience(call)
 
 
 # ==================== ЛИЦЕНЗИИ ====================
