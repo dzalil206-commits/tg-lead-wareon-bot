@@ -1389,6 +1389,8 @@ async def main():
         raise ValueError('BOT_TOKEN не задан')
     await db_init()
     logging.info('🤖 TG Lead Wareon Bot запускается (standalone, без сайта)...')
+    # Снимаем webhook (если остался от прежнего хостинга) — иначе polling даёт Conflict
+    await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(_notify_expiring())
     await dp.start_polling(bot, allowed_updates=['message', 'callback_query'])
 
